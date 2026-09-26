@@ -16,6 +16,7 @@
 
 #include "harness/harness.h"
 #include "host/host.h"
+#include "api/backend_api.h"
 #include "q27/backend_q27.h"
 
 namespace {
@@ -85,7 +86,8 @@ void usage() {
                  "usage: q27-init --model M.q27 --tok T.tok [--tty /dev/tty1|-] [--root DIR]\n"
                  "                [--sysroot DIR] [--cgroup /sys/fs/cgroup] [--ctx N] [--fixed-stack-gb G]\n"
                  "                [--prefix-cache DIR] [--no-think] [--engine-log FILE]\n"
-                 "kernel cmdline (when present) supplies llm= and model= defaults.\n");
+                 "                [--llm cuda|api] [--api-url URL] [--api-model NAME]  (key: PK_API_KEY)\n"
+                 "kernel cmdline supplies llm= model= api_url= api_key= api_model=.\n");
 }
 
 }  // namespace
@@ -95,6 +97,11 @@ int main(int argc, char** argv) {
     std::string tty = "-", root, sysroot = "/usr/lib/potemkin", cgroup, engine_log;
     auto kc = kernel_cmdline();
     std::string llm = kc.count("llm") ? kc["llm"] : "cuda";
+    pk::ApiOpts ao;
+    if (kc.count("api_url")) ao.url = kc["api_url"];
+    if (kc.count("api_key")) ao.key = kc["api_key"];  // on the kernel cmdline, as designed
+    if (kc.count("api_model")) ao.model = kc["api_model"];
+    if (const char* k = getenv("PK_API_KEY")) ao.key = k;  // dev: keep keys out of argv
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&]() -> std::string { if (i + 1 >= argc) { usage(); std::exit(2); } return argv[++i]; };
@@ -110,10 +117,17 @@ int main(int argc, char** argv) {
         else if (a == "--no-think") qo.think = false;
         else if (a == "--llm") llm = next();
         else if (a == "--engine-log") engine_log = next();
+        else if (a == "--api-url") ao.url = next();
+        else if (a == "--api-model") ao.model = next();
         else { usage(); return 2; }
     }
-    if (llm != "cuda") { std::fprintf(stderr, "q27-init: llm=%s not built yet\n", llm.c_str()); return 2; }
-    if (qo.model.empty() || qo.tok.empty()) { usage(); return 2; }
+    if (llm != "cuda" && llm != "api") { std::fprintf(stderr, "q27-init: llm=%s not built yet\n", llm.c_str()); return 2; }
+    if (llm == "cuda") {
+        // Image defaults: model=qwen|bonsai picks the weights on the persistent disk.
+        std::string which = kc.count("model") ? kc["model"] : "bonsai";
+        if (qo.model.empty()) qo.model = "/models/" + which + ".q27";
+        if (qo.tok.empty()) qo.tok = "/models/qwen38.tok";
+    }
 
     // q27 narrates to stderr; that belongs in a log, not on the console.
     if (!engine_log.empty()) {
@@ -139,14 +153,18 @@ int main(int argc, char** argv) {
     hc.cc = {sysroot + "/usr/bin/tcc", "-nostdinc", "-nostdlib", "-static",
              "-I" + sysroot + "/usr/include/x86_64-linux-musl", "-I" + t + "/include",
              m + "/crt1.o", m + "/crti.o", "@SRC@", m + "/libc.a", t + "/libtcc1.a", m + "/crtn.o"};
-    hc.model_name = qo.model.substr(qo.model.rfind('/') + 1);
+    hc.model_name = llm == "api" ? ao.model : qo.model.substr(qo.model.rfind('/') + 1);
     hc.netboot = llm == "api";
+    if (hc.netboot) {
+        std::string ca = ao.ca_file;
+        hc.fetcher = [ca](const std::string& url, std::string& err) { return pk::http_fetch(url, err, ca); };
+    }
     hc.isolate = !root.empty();  // dev: programs see the village as /, like the image
 
     con.say("loading " + hc.model_name + " ...");
     std::unique_ptr<pk::Backend> be;
     try {
-        be = pk::make_q27_backend(qo);
+        be = llm == "api" ? pk::make_api_backend(ao) : pk::make_q27_backend(qo);
     } catch (const std::exception& e) {
         con.say(std::string("model load failed: ") + e.what());
         return 1;

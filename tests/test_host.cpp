@@ -268,6 +268,18 @@ TEST(rollback_kills_later_children) { Env e; Host h(e.cfg); fs::create_directori
 TEST(rollback_unknown) { Env e; Host h(e.cfg); HAS(h.call("snapshot", {{"rollback", "42"}}).body, "error:"); }
 
 // ---- fetch ----
+TEST(fetch_online_text) { Env e; e.cfg.netboot = true;
+    e.cfg.fetcher = [](const std::string& url, std::string& err) { (void)err; return "got " + url; };
+    Host h(e.cfg); CHECK(h.call("fetch", {{"url", "http://x/y"}}).body == "got http://x/y"); }
+TEST(fetch_online_error) { Env e; e.cfg.netboot = true;
+    e.cfg.fetcher = [](const std::string&, std::string& err) { err = "HTTP 404"; return std::string(); };
+    Host h(e.cfg); HAS(h.call("fetch", {{"url", "http://x"}}).body, "error: fetch: HTTP 404"); }
+TEST(fetch_binary_is_hexdump) { Env e; e.cfg.netboot = true;
+    e.cfg.fetcher = [](const std::string&, std::string&) { return std::string("\x7f" "ELF\x00\x01\xff", 7); };
+    Host h(e.cfg); HAS(h.call("fetch", {{"url", "http://x"}}).body, "[binary: hexdump"); }
+TEST(fetch_caps) { Env e; e.cfg.netboot = true; e.cfg.max_result_bytes = 50;
+    e.cfg.fetcher = [](const std::string&, std::string&) { return std::string(500, 'z'); };
+    Host h(e.cfg); auto r = h.call("fetch", {{"url", "http://x"}}); CHECK(r.truncated); }
 TEST(fetch_offline) { Env e; Host h(e.cfg); HAS(h.call("fetch", {{"url", "http://x"}}).body, "error: fetch: not available offline"); }
 
 int main(int argc, char** argv) {

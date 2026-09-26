@@ -1,5 +1,6 @@
 // Host primitives: the eight tools the model gets. See CONTRACT.md.
 #pragma once
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -23,7 +24,10 @@ struct Config {
     std::vector<std::string> cc;       // compiler argv prefix; source file + "-o out" appended
     std::string model_name = "unknown";
     bool netboot = false;
-    bool isolate = false;              // dev: children chroot into root via user+mount namespaces
+    bool isolate = false;
+    // netboot: url -> body; set err on failure. Kept out of the host library
+    // so it needs no HTTP or TLS code.
+    std::function<std::string(const std::string& url, std::string& err)> fetcher;              // dev: children chroot into root via user+mount namespaces
 };
 
 struct Proc {

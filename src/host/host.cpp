@@ -863,9 +863,16 @@ ToolResult Host::t_snapshot(const Args& a) {
 // ---------------------------------------------------------------- fetch
 
 ToolResult Host::t_fetch(const Args& a) {
-    need(a, "fetch", "url");
+    const std::string& url = need(a, "fetch", "url");
     if (!cfg_.netboot) return err("fetch: not available offline");
-    return err("fetch: not implemented yet");
+    if (!cfg_.fetcher) return err("fetch: no network client configured");
+    std::string e;
+    std::string body = cfg_.fetcher(url, e);
+    if (!e.empty()) return err("fetch: " + e);
+    if (valid_utf8(body)) return cap(body);
+    size_t page = std::min(body.size(), cfg_.max_result_bytes / 5);
+    return cap("[binary: hexdump of bytes 0-" + std::to_string(page) + " of " + std::to_string(body.size()) +
+               "; write it to a file with a program if you need all of it]\n" + hexdump(body.substr(0, page), 0));
 }
 
 }  // namespace pk
