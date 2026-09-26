@@ -226,6 +226,26 @@ TEST(compaction_when_near_limit) { Env e; Host h(e.hc); FakeBackend b; CaptureCo
     CHECK(m[0].content == "SYS");  // system prompt unchanged: the prefix-cache cut must not move
     HAS(m[1].content, "SUMMARY: user said hi"); CHECK(m.back().content == "next"); CHECK(m.size() == 3); }
 
+TEST(compaction_fallback_drops_old_turns) { Env e; Host h(e.hc); FakeBackend b; CaptureConsole c; Harness H(b, h, c, e.cfg);
+    b.script = {text("a1"), text("a2"), text("a3")};
+    H.handle_line("q1"); H.handle_line("q2");
+    GenResult big = text("a3"); big.prompt_tokens = 950;
+    GenResult empty; empty.end = "n_max";  // summarizer ran out of room
+    b.script = {big, empty, text("a4")};
+    H.handle_line("q3");
+    H.handle_line("q4");
+    auto& m = b.seen.back();
+    CHECK(m[0].content == "SYS");
+    bool has_q1 = false; for (auto& x : m) if (x.content == "q1") has_q1 = true;
+    CHECK(!has_q1);
+    HAS(m[1].content, "dropped");
+    CHECK(m[m.size() - 2].content == "a3"); CHECK(m.back().content == "q4");
+    CHECK(m[2].role == "user"); }
+TEST(reply_cut_off_is_visible) { Env e; Host h(e.hc); FakeBackend b; CaptureConsole c; Harness H(b, h, c, e.cfg);
+    GenResult r = text("half a thou"); r.end = "n_max";
+    b.script = {r};
+    H.handle_line("go"); HAS(c.all, "cut off"); }
+
 // ---- frozen blocks ----
 TEST(tools_json_has_eight_in_order) {
     std::string t = kToolsJson; size_t pos = 0; std::vector<std::string> names;

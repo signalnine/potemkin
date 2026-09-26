@@ -13,7 +13,9 @@
 #include <poll.h>
 #include <signal.h>
 #include <sstream>
+#include <sched.h>
 #include <sys/ioctl.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <termios.h>
@@ -167,6 +169,29 @@ std::string strip_ansi(const std::string& s) {
     return o;
 }
 
+// Dev mode only: put this (child) process inside the village. A user namespace
+// makes it root there without being root here; a mount namespace lets it see
+// the kernel's /proc, /sys and /dev; chroot does the rest.
+bool enter_village(const std::string& root) {
+    uid_t uid = ::getuid();
+    gid_t gid = ::getgid();
+    if (::unshare(CLONE_NEWUSER | CLONE_NEWNS) != 0) return false;
+    auto put = [](const char* f, const std::string& v) {
+        int fd = ::open(f, O_WRONLY);
+        if (fd < 0) return false;
+        bool ok = ::write(fd, v.data(), v.size()) == (ssize_t)v.size();
+        ::close(fd);
+        return ok;
+    };
+    put("/proc/self/setgroups", "deny");
+    if (!put("/proc/self/uid_map", "0 " + std::to_string(uid) + " 1\n")) return false;
+    if (!put("/proc/self/gid_map", "0 " + std::to_string(gid) + " 1\n")) return false;
+    ::mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr);
+    for (const char* k : {"/proc", "/sys", "/dev"})
+        if (::mount(k, (root + k).c_str(), nullptr, MS_BIND | MS_REC, nullptr) != 0) return false;
+    return ::chroot(root.c_str()) == 0 && ::chdir("/") == 0;
+}
+
 struct TtyResult { int status = 0; bool escaped = false, timed_out = false; std::string tail; };
 
 // Shuttle bytes console <-> child pty until the child exits. Two Ctrl-] in a
@@ -301,7 +326,12 @@ std::vector<std::string> split_argv(const std::string& s) {
 
 // ---------------------------------------------------------------- Host
 
-Host::Host(Config c) : cfg_(std::move(c)) {}
+Host::Host(Config c) : cfg_(std::move(c)) {
+    if (cfg_.isolate && !cfg_.root.empty()) {
+        std::error_code ec;
+        for (const char* k : {"/proc", "/sys", "/dev"}) fs::create_directories(cfg_.root + k, ec);
+    }
+}
 
 Host::~Host() {
     for (auto& [pid, p] : procs_)
@@ -549,7 +579,16 @@ ToolResult Host::t_spawn(const Args& a) {
             ::dup2(sfd, 0); ::dup2(sfd, 1); ::dup2(sfd, 2);
             if (sfd > 2) ::close(sfd);
         }
-        ::execv(path.c_str(), cargv.data());
+        if (cfg_.isolate && !cfg_.root.empty()) {
+            if (!enter_village(cfg_.root)) {
+                int e = errno;
+                (void)!::write(execpipe[1], &e, sizeof e);
+                ::_exit(127);
+            }
+            ::execv(exe.c_str(), cargv.data());
+        } else {
+            ::execv(path.c_str(), cargv.data());
+        }
         int e = errno;
         (void)!::write(execpipe[1], &e, sizeof e);
         ::_exit(127);

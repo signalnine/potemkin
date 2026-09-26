@@ -23,6 +23,7 @@ struct Config {
     std::vector<std::string> cc;       // compiler argv prefix; source file + "-o out" appended
     std::string model_name = "unknown";
     bool netboot = false;
+    bool isolate = false;              // dev: children chroot into root via user+mount namespaces
 };
 
 struct Proc {

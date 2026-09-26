@@ -185,6 +185,23 @@ TEST(tty_single_ctrl_bracket_passes_through) { FakeConsole con; Config c; c.root
     auto b = h.call("spawn", {{"exe", "/bin/cat"}, {"mode", "tty"}}).body;
     t.join(); HAS(b, "exit=0"); LACKS(b, "escape"); }
 
+// ---- dev isolation ----
+static const char* kLsRoot =
+    "#include <stdio.h>\n#include <dirent.h>\n"
+    "int main(void){ DIR *d = opendir(\"/\"); struct dirent *e; if(!d) return 9;\n"
+    "  while((e = readdir(d))) printf(\"[%s]\\n\", e->d_name);\n"
+    "  FILE *f = fopen(\"/proc/self/status\", \"r\"); printf(f ? \"proc-ok\\n\" : \"proc-missing\\n\");\n"
+    "  printf(\"uid=%d\\n\", (int)getuid()); return 0; }\n";
+TEST(isolated_child_sees_village) { Env e; e.cfg.isolate = true; Host h(e.cfg);
+    auto c = h.call("compile", {{"lang", "c"}, {"name", "lsroot"}, {"source", std::string("#include <unistd.h>\n") + kLsRoot}}).body;
+    HAS(c, "exit=0");
+    auto b = h.call("spawn", {{"exe", "/generated/bin/lsroot"}}).body;
+    HAS(b, "exit=0"); HAS(b, "[generated]"); HAS(b, "[store]"); LACKS(b, "[usr]"); HAS(b, "proc-ok"); HAS(b, "uid=0"); }
+TEST(isolated_background_logs) { Env e; e.cfg.isolate = true; Host h(e.cfg);
+    h.call("compile", {{"lang", "c"}, {"name", "lsroot"}, {"source", std::string("#include <unistd.h>\n") + kLsRoot}});
+    auto b = h.call("spawn", {{"exe", "/generated/bin/lsroot"}, {"mode", "background"}}).body;
+    auto w = h.call("wait", {{"pid", pid_of(b)}}).body; HAS(w, "exit=0"); HAS(w, "[state]"); }
+
 // ---- wait ----
 TEST(wait_background) { Env e; Host h(e.cfg); fs::create_directories(e.root / "bin"); fs::create_symlink("/bin/echo", e.root / "bin/echo");
     auto b = h.call("spawn", {{"exe", "/bin/echo"}, {"argv", "done-it"}, {"mode", "background"}}).body;

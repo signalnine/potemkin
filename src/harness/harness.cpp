@@ -248,7 +248,11 @@ void Harness::user_turn(const std::string& content, const std::string& intent) {
             break;
         }
         msgs_.push_back({"assistant", r.text, r.reasoning, r.calls});
-        if (r.calls.empty()) break;
+        if (r.calls.empty()) {
+            if (r.end == "n_max" || r.end == "ctx-guard")
+                con_.say("[reply cut off after " + std::to_string(r.gen_tokens) + " tokens]");
+            break;
+        }
         for (auto& c : r.calls) run_call(c);
     }
     save_transcript();
@@ -264,7 +268,20 @@ void Harness::maybe_compact(const GenResult& r) {
     std::atomic<bool> no{false};
     struct Quiet : StreamSink { void think(const std::string&) override {} void text(const std::string&) override {} } quiet;
     GenResult s = be_.generate(req, quiet, no);
-    if (s.end == "error" || trim(s.text).empty()) return;
+    if (s.end == "error" || trim(s.text).empty()) {
+        // No room left even to summarize: keep the newer half of the
+        // conversation, cut at a user turn, and say what happened.
+        size_t keep_from = 1 + (msgs_.size() - 1) / 2;
+        while (keep_from < msgs_.size() && msgs_[keep_from].role != "user") ++keep_from;
+        if (keep_from >= msgs_.size()) keep_from = msgs_.size() - 1;
+        std::vector<Message> kept(msgs_.begin() + keep_from, msgs_.end());
+        msgs_.resize(1);
+        msgs_.push_back({"user", "[harness] The context filled up and a summary did not fit, so the earlier "
+                                 "conversation was dropped. /intent/log and /state/summaries still have it.", "", {}});
+        msgs_.insert(msgs_.end(), kept.begin(), kept.end());
+        save_transcript();
+        return;
+    }
     std::ofstream(host_.real("/state/summaries"), std::ios::app) << "--- " << now_iso() << " turn=" << turn_ << "\n"
                                                                    << trim(s.text) << "\n";
     // The system message stays byte-identical so the prefix-cache cut holds.

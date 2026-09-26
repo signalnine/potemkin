@@ -141,6 +141,7 @@ int main(int argc, char** argv) {
              m + "/crt1.o", m + "/crti.o", "@SRC@", m + "/libc.a", t + "/libtcc1.a", m + "/crtn.o"};
     hc.model_name = qo.model.substr(qo.model.rfind('/') + 1);
     hc.netboot = llm == "api";
+    hc.isolate = !root.empty();  // dev: programs see the village as /, like the image
 
     con.say("loading " + hc.model_name + " ...");
     std::unique_ptr<pk::Backend> be;
