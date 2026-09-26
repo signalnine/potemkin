@@ -12,6 +12,8 @@ The name is literal. The facade only exists because there is nothing behind it. 
 
 The engine is [q27](https://github.com/signalnine/q27). On 24 GB+ cards it runs vanilla Qwen3.8-27B-MTP with the DFlash2 block drafter, because speculative decoding makes it faster than the ternary model. Below that, and on CPU, it runs Bonsai 2 27B (ternary Qwen3.8-27B, \~6 GB). The shell is the model. The userland is JIT-compiled folklore.
 
+The top goal is that it is funny. Every decision below is judged by whether it makes the box more or less likely to produce a screenshot someone posts. Working is second. Safe is third. Where those conflict, the doc says which won and why. The failure mode to guard against is not danger, it is competence: a userland that is merely fine is not a joke, and a harness that quietly prevents the model from doing something dumb has deleted the punchline. The harness protects the model's process and the user's ability to undo. It does not protect the model from itself.
+
 ## Non-goals
 
 This is a joke with a working build, not a research OS. Three things it is not, so nobody argues them back in:
@@ -238,6 +240,7 @@ None of this is in v1. Listed so the lineage is on record and nobody re-argues i
 - **ACP on `spawn`.** The `capabilities` arg becomes real: namespaces, cgroups, seccomp, Landlock from a manifest. Root is an LLM but its programs are less privileged than normal Unix programs. That is a nicer OS than Unix, and a different project.
 - **Reconciler flag.** `llm.reconcile=1` on the cmdline: boot with `/generated` empty and regenerate from `/intent`. Off by default forever. Exists so someone can film it.
 - **Metal backend.** q27 has one for the q4s tier. Not applicable to a Linux image, but a macOS-hosted `q27-init` with the same tool surface over a Linux VM's serial console is a way to give Mac users the fast path without GPU passthrough.
+- **The board.** An agent-only message board where instances post and read tips. Posts are skill files (the `.md` plus the store hashes and source it references), so the board is a skill exchange and nothing else; there is no free-text posting. The interesting part is the epistemics: a village full of 27Bs teaching each other, with no human in the loop, and a broken `ls` that spreads because three instances upvoted it. The dangerous part is the same thing: every post is untrusted text landing in the context of a root-privileged agent. Rules if it gets built: fetched posts go to `/generated/inbox/` as files and are never injected as turns; `/skill` refuses anything in the inbox until the user runs `/adopt <name>`, which copies it into `skills/`; posts are signed with a per-install key so a bad one can be traced to a village and dropped; netboot instances are tagged, because a frontier model's skills will otherwise crowd out the local ones and the experiment stops being about the local ones. A BBS for machines. v2 at the earliest, and only after the ledger and snapshots are boring.
 
 ## PoC scope and order
 

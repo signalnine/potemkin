@@ -8,7 +8,9 @@ Pre-code. The only file is `PotemkinOS — Design Doc.md`, which is the source o
 
 ## What this is
 
-PotemkinOS: a Linux image with no userland. Boot lands in a chat with a local model (via [q27](https://github.com/signalnine/q27)), and the model writes every userland program itself, in C, compiled by tcc, at runtime. It is a joke with a working build. The design doc's Non-goals section is deliberate: not pure, not secure (children run as root in v1), not a reconciler. Don't argue those back in, and don't pull Stretch items (PTX backend, capability manifests/seccomp/Landlock, reconcile-on-boot, Metal) into v1.
+PotemkinOS: a Linux image with no userland. Boot lands in a chat with a local model (via [q27](https://github.com/signalnine/q27)), and the model writes every userland program itself, in C, compiled by tcc, at runtime. It is a joke with a working build. The design doc's Non-goals section is deliberate: not pure, not secure (children run as root in v1), not a reconciler. Don't argue those back in, and don't pull Stretch items (PTX backend, capability manifests/seccomp/Landlock, reconcile-on-boot, Metal, the agent board) into v1.
+
+Priority order for every decision: funny > working > safe. The failure mode to avoid is competence: the harness protects the inference process and the user's ability to undo, and must not quietly stop the model from doing something dumb (no guardrails, validation, or "helpful" fixups on what the model writes or runs).
 
 ## Architecture (the parts that span the doc)
 
