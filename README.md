@@ -88,6 +88,27 @@ village as `/` just as they would on the real image.
 
 `tools/drive.py` drives it from a script through a pty.
 
+### Booting it on real hardware (llm=cuda)
+
+The cuda initramfs carries `nvidia.ko` and `nvidia-uvm.ko` built for the
+running kernel, so boot it with that same kernel.
+
+1. Build: `PROFILE=full bash tools/build.sh init` (5090/4090),
+   `PROFILE=w8` (24 GB cards) or the default 12g build (12 GB and under), then
+   `ARCH=full|w8|86 bash tools/mkimage.sh cuda`.
+2. A spare partition, ext4 or btrfs, becomes the persistent disk. Put the
+   weights in `/models` on it: `qwen.q27` or `bonsai.q27`, `qwen38.tok`, and
+   optionally `qwen-dflash2.d2w` (DFlash2 turns on when it is present). The
+   other trees (`data state generated store intent cache snapshots`) are
+   created on first boot.
+3. Add a boot entry using `/boot/vmlinuz-$(uname -r)`, the initramfs from
+   `build/image-cuda/initramfs.gz`, and a command line like
+   `potemkin.disk=/dev/nvme1n1p2 llm=cuda model=qwen ip=dhcp`. Add
+   `init=/sbin/rescue` for the rescue menu.
+
+The console is `/dev/tty1` on the firmware framebuffer. Thirty to sixty
+seconds of black screen while the weights load, then the model.
+
 ## Backends
 
 One image; the kernel cmdline picks: `llm=cuda|api` and `model=qwen|bonsai`.
