@@ -148,4 +148,4 @@ NVIDIA, less Linus. sm_87 is not in the tri-arch build yet.
 A PTX backend for `compile` so the model can rewrite its own inference engine;
 capability manifests on `spawn`; a reconcile-on-boot flag so someone can film
 a village regenerating from `/intent`; an agent-only board where villages
-trade skills. None of it is in v1.
+trade skills. (what could go wrong??)
