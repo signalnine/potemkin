@@ -20,10 +20,6 @@ hello. there is nothing here yet.
   spawn /generated/bin/ls /
 ```
 
-It is a joke with a working build. Funny comes first, working second, safe
-third, and the [design doc](PotemkinOS%20%E2%80%94%20Design%20Doc.md) says
-which one won every time they fought.
-
 ## Status
 
 It boots. In a VM the `llm=api` image comes up with DHCP, talks to any
