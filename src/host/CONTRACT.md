@@ -47,7 +47,11 @@ Verified by `build/test_host` (`tests/test_host.cpp`).
 - [x] background: returns `pid=<n>` immediately; output goes to `/state/log/<pid>` -> test `spawn_background`
 - [x] Every spawn/exit rewrites `/state/procs` (pid, mode, state, turn, argv) -> test `procs_table`
 - [x] With `cgroup_root` set, child is placed in `<cgroup_root>/potemkin/<pid>` with `memory.max` and `pids.max` written (tested against a fake cgroup dir) -> test `spawn_cgroup_files`
-- [x] tty mode: implemented against `Config::tty_path`; not unit-tested (needs a real tty) -- verified in the VM boot demo
+- [x] tty mode: child gets its own pty, proxied to `Config::tty_path` (raw mode while proxying); output reaches the console and the last ~2K (ANSI stripped) comes back in the body -> test `tty_runs_child`
+- [x] tty mode: console keystrokes reach the child -> test `tty_input_reaches_child`
+- [x] tty mode: Ctrl-] twice kills the child's session, body says `escape` -> test `tty_escape_chord`
+- [x] tty mode: a lone Ctrl-] is passed through -> test `tty_single_ctrl_bracket_passes_through`
+- [x] tty mode: no default timeout (only an explicit timeout_s applies)
 
 ## wait(pid, signal="")
 - [x] Waits for a background child, returns `exit=<code>` + tail of its log -> test `wait_background`

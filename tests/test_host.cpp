@@ -8,6 +8,10 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <thread>
+#include <fcntl.h>
+#include <poll.h>
+#include <chrono>
 #include <signal.h>
 #include <sstream>
 #include <sys/stat.h>
@@ -137,6 +141,44 @@ TEST(spawn_cgroup_files) { Env e; fs::path cg = e.root / "cg"; fs::create_direct
         found = true; CHECK(slurp(d.path() / "memory.max") == std::to_string(64ll << 20)); CHECK(slurp(d.path() / "pids.max") == "256");
         HAS(slurp(d.path() / "cgroup.procs"), ""); }
     CHECK(found); }
+
+// ---- tty mode ----
+// A pty pair stands in for /dev/tty1: the test holds the master (the "user"),
+// the Host opens the slave as its console.
+struct FakeConsole {
+    int master = -1; std::string slave;
+    FakeConsole() { master = posix_openpt(O_RDWR | O_NOCTTY); grantpt(master); unlockpt(master); slave = ptsname(master); }
+    ~FakeConsole() { close(master); }
+    void type(const std::string& s) { (void)!write(master, s.data(), s.size()); }
+    std::string drain(int ms) {  // everything the user would see
+        std::string out; char buf[4096];
+        auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+        while (std::chrono::steady_clock::now() < end) {
+            struct pollfd p{master, POLLIN, 0};
+            if (poll(&p, 1, 50) > 0) { ssize_t r = read(master, buf, sizeof buf); if (r <= 0) break; out.append(buf, r); }
+        }
+        return out;
+    }
+};
+TEST(tty_runs_child) { FakeConsole con; Config c; c.root = ""; c.tty_path = con.slave; Host h(c);
+    std::string seen; std::thread t([&] { seen = con.drain(1500); });
+    auto b = h.call("spawn", {{"exe", "/bin/echo"}, {"argv", "via-pty"}, {"mode", "tty"}}).body;
+    t.join(); HAS(b, "exit=0"); HAS(b, "via-pty"); HAS(seen, "via-pty"); }
+TEST(tty_input_reaches_child) { FakeConsole con; Config c; c.root = ""; c.tty_path = con.slave; Host h(c);
+    std::string seen;
+    std::thread t([&] { usleep(300000); con.type("abc\n"); usleep(200000); con.type("\x04"); seen = con.drain(1000); });
+    auto b = h.call("spawn", {{"exe", "/bin/cat"}, {"mode", "tty"}, {"timeout_s", "10"}}).body;
+    t.join(); HAS(b, "exit=0"); HAS(b, "abc"); }
+TEST(tty_escape_chord) { FakeConsole con; Config c; c.root = ""; c.tty_path = con.slave; Host h(c);
+    std::thread t([&] { usleep(300000); con.type("\x1d\x1d"); con.drain(500); });
+    auto t0 = std::chrono::steady_clock::now();
+    auto b = h.call("spawn", {{"exe", "/bin/sleep"}, {"argv", "30"}, {"mode", "tty"}}).body;
+    t.join(); HAS(b, "escape"); HAS(b, "signal=9");
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(5)); }
+TEST(tty_single_ctrl_bracket_passes_through) { FakeConsole con; Config c; c.root = ""; c.tty_path = con.slave; Host h(c);
+    std::thread t([&] { usleep(300000); con.type("\x1dx\n"); usleep(200000); con.type("\x04"); con.drain(800); });
+    auto b = h.call("spawn", {{"exe", "/bin/cat"}, {"mode", "tty"}}).body;
+    t.join(); HAS(b, "exit=0"); LACKS(b, "escape"); }
 
 // ---- wait ----
 TEST(wait_background) { Env e; Host h(e.cfg); fs::create_directories(e.root / "bin"); fs::create_symlink("/bin/echo", e.root / "bin/echo");

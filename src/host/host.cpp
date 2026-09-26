@@ -147,6 +147,85 @@ void copy_tree(const fs::path& from, const fs::path& to) {
                            fs::copy_options::overwrite_existing);
 }
 
+// Drop CSI/OSC escape sequences and carriage returns so the model reads the
+// text a terminal would have shown, not the control bytes.
+std::string strip_ansi(const std::string& s) {
+    std::string o;
+    for (size_t i = 0; i < s.size(); ++i) {
+        unsigned char c = s[i];
+        if (c == 0x1b && i + 1 < s.size() && s[i + 1] == '[') {
+            i += 2;
+            while (i < s.size() && !(s[i] >= 0x40 && s[i] <= 0x7e)) ++i;
+        } else if (c == 0x1b && i + 1 < s.size() && s[i + 1] == ']') {
+            i += 2;
+            while (i < s.size() && s[i] != 0x07 && !(s[i] == 0x1b && i + 1 < s.size() && s[i + 1] == '\\')) ++i;
+            if (i < s.size() && s[i] == 0x1b) ++i;
+        } else if (c != '\r') {
+            o += char(c);
+        }
+    }
+    return o;
+}
+
+struct TtyResult { int status = 0; bool escaped = false, timed_out = false; std::string tail; };
+
+// Shuttle bytes console <-> child pty until the child exits. Two Ctrl-] in a
+// row kill the child's session; a lone Ctrl-] is passed through.
+TtyResult proxy_tty(int conf, int ptm, pid_t pid, long long timeout_s) {
+    TtyResult r;
+    struct termios saved, raw;
+    bool have = ::tcgetattr(conf, &saved) == 0;
+    if (have) { raw = saved; ::cfmakeraw(&raw); ::tcsetattr(conf, TCSANOW, &raw); }
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
+    bool held = false, exited = false;
+    int st = 0;
+    const size_t keep = 8192;
+    auto push = [&](const char* b, size_t n) {
+        r.tail.append(b, n);
+        if (r.tail.size() > keep * 2) r.tail.erase(0, r.tail.size() - keep);
+    };
+    for (;;) {
+        if (!exited && ::waitpid(pid, &st, WNOHANG) == pid) exited = true;
+        if (timeout_s > 0 && !exited && std::chrono::steady_clock::now() >= deadline) {
+            ::kill(-pid, SIGKILL);
+            r.timed_out = true;
+        }
+        struct pollfd fds[2] = {{conf, POLLIN, 0}, {ptm, POLLIN, 0}};
+        int n = ::poll(fds, 2, exited ? 50 : 100);
+        if (n < 0 && errno != EINTR) break;
+        bool got_out = false;
+        if (fds[1].revents & POLLIN) {
+            char buf[4096];
+            ssize_t k = ::read(ptm, buf, sizeof buf);
+            if (k > 0) { (void)!::write(conf, buf, k); push(buf, k); got_out = true; }
+            else if (exited) break;
+        } else if (fds[1].revents & (POLLHUP | POLLERR)) {
+            if (exited) break;
+        }
+        if (exited && !got_out) break;  // drained
+        if (!exited && (fds[0].revents & POLLIN)) {
+            char buf[1024];
+            ssize_t k = ::read(conf, buf, sizeof buf);
+            std::string fwd;
+            for (ssize_t i = 0; i < k; ++i) {
+                if (buf[i] == 0x1d) {
+                    if (held) { r.escaped = true; break; }
+                    held = true;
+                    continue;
+                }
+                if (held) { fwd += char(0x1d); held = false; }
+                fwd += buf[i];
+            }
+            if (r.escaped) { ::kill(-pid, SIGKILL); continue; }
+            if (!fwd.empty()) (void)!::write(ptm, fwd.data(), fwd.size());
+        }
+    }
+    if (!exited) ::waitpid(pid, &st, 0);
+    if (have) ::tcsetattr(conf, TCSANOW, &saved);
+    r.status = st;
+    return r;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------- sha256
@@ -417,10 +496,18 @@ ToolResult Host::t_spawn(const Args& a) {
     if (mode == "background") {
         fs::create_directories(real("/state/log"));
     }
-    int ttyfd = -1;
+    // tty mode: the child gets its own pty and the harness proxies it to the
+    // console, so it can see the escape chord and keep the output tail.
+    int conf = -1, ptm = -1;
+    std::string pts;
     if (mode == "tty") {
-        ttyfd = ::open(cfg_.tty_path.c_str(), O_RDWR | O_CLOEXEC);
-        if (ttyfd < 0) return err("spawn: tty " + cfg_.tty_path + ": " + std::strerror(errno));
+        conf = ::open(cfg_.tty_path.c_str(), O_RDWR | O_NOCTTY | O_CLOEXEC);
+        if (conf < 0) return err("spawn: tty " + cfg_.tty_path + ": " + std::strerror(errno));
+        ptm = ::posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
+        if (ptm < 0 || ::grantpt(ptm) || ::unlockpt(ptm)) { ::close(conf); return err("spawn: no pty available"); }
+        pts = ::ptsname(ptm);
+        struct winsize ws;
+        if (::ioctl(conf, TIOCGWINSZ, &ws) == 0) ::ioctl(ptm, TIOCSWINSZ, &ws);
     }
 
     // The child waits for the parent to set up its cgroup before exec.
@@ -430,7 +517,8 @@ ToolResult Host::t_spawn(const Args& a) {
     pid_t pid = ::fork();
     if (pid < 0) return err("spawn: fork failed");
     if (pid == 0) {
-        ::setpgid(0, 0);
+        if (mode == "tty") ::setsid();  // new session; must not be a group leader first
+        else ::setpgid(0, 0);
         ::signal(SIGPIPE, SIG_DFL);
         ::signal(SIGINT, SIG_DFL);
         char go;
@@ -447,20 +535,21 @@ ToolResult Host::t_spawn(const Args& a) {
             int fd = ::open(lp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if (fd >= 0) { ::dup2(fd, 1); ::dup2(fd, 2); }
         } else {
-            ::setsid();
-            ::ioctl(ttyfd, TIOCSCTTY, 1);
-            ::dup2(ttyfd, 0); ::dup2(ttyfd, 1); ::dup2(ttyfd, 2);
+            int sfd = ::open(pts.c_str(), O_RDWR);
+            if (sfd < 0) ::_exit(127);
+            ::ioctl(sfd, TIOCSCTTY, 0);
+            ::dup2(sfd, 0); ::dup2(sfd, 1); ::dup2(sfd, 2);
+            if (sfd > 2) ::close(sfd);
         }
         ::execv(path.c_str(), cargv.data());
         int e = errno;
         (void)!::write(execpipe[1], &e, sizeof e);
         ::_exit(127);
     }
-    ::setpgid(pid, pid);
+    if (mode != "tty") ::setpgid(pid, pid);
     ::close(gopipe[0]);
     ::close(execpipe[1]);
     if (inpipe[0] >= 0) { ::close(inpipe[0]); ::close(outpipe[1]); }
-    if (ttyfd >= 0) ::close(ttyfd);
 
     if (!cfg_.cgroup_root.empty()) {
         fs::path cg = fs::path(cfg_.cgroup_root) / "potemkin" / std::to_string(pid);
@@ -479,6 +568,7 @@ ToolResult Host::t_spawn(const Args& a) {
     if (got == sizeof eno) {
         ::waitpid(pid, nullptr, 0);
         if (inpipe[1] >= 0) { ::close(inpipe[1]); ::close(outpipe[0]); }
+        if (conf >= 0) { ::close(conf); ::close(ptm); }
         return err("spawn: exec " + exe + ": " + std::strerror(eno));
     }
 
@@ -497,11 +587,19 @@ ToolResult Host::t_spawn(const Args& a) {
     write_procs();
 
     if (mode == "tty") {
-        int st = 0;
-        ::waitpid(pid, &st, 0);
-        procs_[pid].state = "exited " + status_str(st);
+        // Only an explicit timeout applies: the default 60 s would kill a shell.
+        long long tmo = a.count("timeout_s") ? timeout : 0;
+        TtyResult r = proxy_tty(conf, ptm, pid, tmo);
+        ::close(conf);
+        ::close(ptm);
+        procs_[pid].state = "exited " + status_str(r.status);
         write_procs();
-        return {status_str(st)};
+        procs_.erase(pid);
+        write_procs();
+        std::string head = r.escaped ? "escape chord: killed by user; " + status_str(r.status)
+                         : r.timed_out ? "timeout after " + std::to_string(tmo) + "s, killed; " + status_str(r.status)
+                         : status_str(r.status);
+        return cap(head + "\n" + tail(strip_ansi(r.tail), 2048));
     }
 
     // capture: feed stdin, collect output until exit or timeout.
