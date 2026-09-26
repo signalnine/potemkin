@@ -241,6 +241,22 @@ static int dhcp_lease(const char* ifname, char* spec, size_t speclen) {
     return -1;
 }
 
+// The n-th (0-based) network interface other than lo, in name order;
+// readdir order is arbitrary and eth0 must mean eth0.
+static int nth_iface(int n, char* out, size_t len) {
+    char names[16][IFNAMSIZ];
+    int k = 0;
+    DIR* d = opendir("/sys/class/net");
+    struct dirent* e;
+    while (d && (e = readdir(d)) && k < 16)
+        if (e->d_name[0] != '.' && strcmp(e->d_name, "lo")) snprintf(names[k++], IFNAMSIZ, "%.15s", e->d_name);
+    if (d) closedir(d);
+    qsort(names, k, IFNAMSIZ, (int (*)(const void*, const void*))strcmp);
+    if (n >= k) return -1;
+    snprintf(out, len, "%s", names[n]);
+    return 0;
+}
+
 static void net(void) {
     int s = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (s < 0) return;
@@ -251,12 +267,7 @@ static void net(void) {
     char buf[256];
     if (!strcmp(spec, "dhcp")) {
         char ifn[IFNAMSIZ] = "";
-        DIR* dd = opendir("/sys/class/net");
-        struct dirent* de;
-        while (dd && (de = readdir(dd)))
-            if (de->d_name[0] != '.' && strcmp(de->d_name, "lo")) { snprintf(ifn, sizeof ifn, "%.15s", de->d_name); break; }
-        if (dd) closedir(dd);
-        if (!ifn[0]) { say("init: dhcp: no interface\n"); close(s); return; }
+        if (nth_iface(0, ifn, sizeof ifn) != 0) { say("init: dhcp: no interface\n"); close(s); return; }
         ifup(s, ifn, NULL, 0);
         if (dhcp_lease(ifn, buf, sizeof buf) != 0) { say("init: dhcp on %s: no lease\n", ifn); close(s); return; }
         say("init: dhcp lease %s\n", buf);
@@ -270,14 +281,8 @@ static void net(void) {
     int prefix = 24;
     if (slash) { *slash = 0; prefix = atoi(slash + 1); }
 
-    // First interface that is not lo.
     char ifname[IFNAMSIZ] = "";
-    DIR* d = opendir("/sys/class/net");
-    struct dirent* e;
-    while (d && (e = readdir(d)))
-        if (e->d_name[0] != '.' && strcmp(e->d_name, "lo")) { snprintf(ifname, sizeof ifname, "%.15s", e->d_name); break; }
-    if (d) closedir(d);
-    if (!ifname[0] || !addr) { say("init: no network interface\n"); close(s); return; }
+    if (nth_iface(0, ifname, sizeof ifname) != 0 || !addr) { say("init: no network interface\n"); close(s); return; }
     ifup(s, ifname, addr, prefix);
     if (gw) {
         struct rtentry rt;
@@ -296,6 +301,19 @@ static void net(void) {
         if (f) { fprintf(f, "nameserver %s\n", dns); fclose(f); }
     }
     say("init: %s %s/%d gw %s\n", ifname, addr, prefix, gw ? gw : "-");
+    // potemkin.net2=A.B.C.D/N: a second interface, e.g. a private segment
+    // shared with other villages.
+    const char* spec2 = arg("potemkin.net2", NULL);
+    char if2[IFNAMSIZ];
+    if (spec2 && nth_iface(1, if2, sizeof if2) == 0) {
+        char b2[64];
+        snprintf(b2, sizeof b2, "%s", spec2);
+        char* sl = strchr(b2, '/');
+        int p2 = 24;
+        if (sl) { *sl = 0; p2 = atoi(sl + 1); }
+        ifup(s, if2, b2, p2);
+        say("init: %s %s/%d\n", if2, b2, p2);
+    }
     close(s);
 }
 
@@ -407,6 +425,13 @@ int main(int argc, char** argv) {
     mkdir("/sys/fs/cgroup/potemkin", 0755);
     put("/sys/fs/cgroup/potemkin/cgroup.subtree_control", "+memory +pids");
 
+    const char* host = arg("potemkin.hostname", NULL);
+    if (host) {
+        if (sethostname(host, strlen(host)) != 0) say("init: hostname: %s\n", strerror(errno));
+        mkdir("/etc", 0755);
+        FILE* hf = fopen("/etc/hostname", "w");
+        if (hf) { fprintf(hf, "%s\n", host); fclose(hf); }
+    }
     load_modules();
     nvidia_nodes();
     net();
