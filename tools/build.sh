@@ -24,10 +24,12 @@ if [[ $what == init || $what == all ]]; then
   # pair with slim packs). PROFILE=full: q27's default tri-arch shape
   # (sm_86/89/120, W_MAX=12, 1024-row prefill) for 24 GB+ cards.
   PROFILE=${PROFILE:-12g}
+  TRI="-gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 -gencode arch=compute_120,code=sm_120"
   if [[ $PROFILE == full ]]; then
-    GEN="-gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 -gencode arch=compute_120,code=sm_120"
-    SHAPE=""
-    ARCH=full
+    GEN=$TRI; SHAPE=""; ARCH=full
+  elif [[ $PROFILE == w8 ]]; then
+    # 24 GB cards: the width-12 graph set OOMs at setup there (q27 README).
+    GEN=$TRI; SHAPE="-DQ27_W_MAX=8"; ARCH=w8
   else
     GEN="-gencode arch=compute_$ARCH,code=sm_$ARCH"
     SHAPE="-DQ27_W_MAX=8 -DQ27_PF_T=256"
