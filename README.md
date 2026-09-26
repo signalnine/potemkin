@@ -1,7 +1,7 @@
 # PotemkinOS
 
 A Linux image with no userland. You boot into a chat session with a local
-model, and every program you can invoke at was written by that model, at boot,
+model, and every program you can invoke was written by that model, at boot,
 on this machine, and it shows.
 
 There is no `/bin`, no shell, no package manager, no coreutils. There is a
