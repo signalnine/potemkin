@@ -91,6 +91,20 @@ const char* kCompactPrompt =
 
 }  // namespace
 
+// Keep the newer half of the conversation, cut at a user turn, and say what
+// happened. The fallback when even a summary will not fit.
+void Harness::drop_older_half() {
+    size_t keep_from = 1 + (msgs_.size() - 1) / 2;
+    while (keep_from < msgs_.size() && msgs_[keep_from].role != "user") ++keep_from;
+    if (keep_from >= msgs_.size()) keep_from = msgs_.size() - 1;
+    std::vector<Message> kept(msgs_.begin() + keep_from, msgs_.end());
+    msgs_.resize(1);
+    msgs_.push_back({"user", "[harness] The context filled up and a summary did not fit, so the earlier "
+                             "conversation was dropped. /intent/log and /state/summaries still have it.", "", {}});
+    msgs_.insert(msgs_.end(), kept.begin(), kept.end());
+    save_transcript();
+}
+
 // What /generated/bin actually holds, for the model to check its memory against.
 std::string Harness::ledger() const {
     std::vector<std::string> lines;
@@ -256,8 +270,20 @@ void Harness::user_turn(const std::string& content, const std::string& intent) {
     msgs_.push_back({"user", content, "", {}});
 
     GenResult last;
+    int shrinks = 0;
     for (;;) {
         GenResult r = be_.generate(msgs_, con_, cancel);
+        // The history outgrew the model's window (a server said so, or the
+        // local engine had no room left): shed the older half and retry.
+        bool too_long = r.end == "ctx-guard" ||
+                        (r.end == "error" && (r.text.find("context_length") != std::string::npos ||
+                                              r.text.find("too long") != std::string::npos));
+        if (too_long && shrinks < 3 && msgs_.size() > 3) {
+            ++shrinks;
+            con_.note("  (history too long for the model; dropped the older half)");
+            drop_older_half();
+            continue;
+        }
         con_.text("\n");
         last = r;
         if (r.end == "cancelled" || cancel) {
@@ -301,17 +327,7 @@ bool Harness::maybe_compact(const GenResult& r) {
     struct Quiet : StreamSink { void think(const std::string&) override {} void text(const std::string&) override {} } quiet;
     GenResult s = be_.generate(req, quiet, no);
     if (s.end == "error" || trim(s.text).empty()) {
-        // No room left even to summarize: keep the newer half of the
-        // conversation, cut at a user turn, and say what happened.
-        size_t keep_from = 1 + (msgs_.size() - 1) / 2;
-        while (keep_from < msgs_.size() && msgs_[keep_from].role != "user") ++keep_from;
-        if (keep_from >= msgs_.size()) keep_from = msgs_.size() - 1;
-        std::vector<Message> kept(msgs_.begin() + keep_from, msgs_.end());
-        msgs_.resize(1);
-        msgs_.push_back({"user", "[harness] The context filled up and a summary did not fit, so the earlier "
-                                 "conversation was dropped. /intent/log and /state/summaries still have it.", "", {}});
-        msgs_.insert(msgs_.end(), kept.begin(), kept.end());
-        save_transcript();
+        drop_older_half();  // no room left even to summarize
         return true;
     }
     std::ofstream(host_.real("/state/summaries"), std::ios::app) << "--- " << now_iso() << " turn=" << turn_ << "\n"

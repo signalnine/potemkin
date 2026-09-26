@@ -74,6 +74,7 @@ private:
     bool maybe_compact(const GenResult& r);  // true if the history was replaced
     Action slash(const std::string& line);
     std::string ledger() const;
+    void drop_older_half();
 
     Backend& be_;
     Host& host_;

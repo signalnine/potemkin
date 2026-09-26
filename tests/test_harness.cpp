@@ -300,6 +300,17 @@ TEST(compaction_mid_turn_between_rounds) { Env e; Host h(e.hc); FakeBackend b; C
     HAS(after.back().content, "Continue where you left off");
     CHECK(fs::exists(e.root / "data/b")); HAS(c.all, "done"); }
 
+TEST(too_long_prompt_drops_history_and_retries) { Env e; Host h(e.hc); FakeBackend b; CaptureConsole c; Harness H(b, h, c, e.cfg);
+    b.script = {text("a1"), text("a2"), text("a3")};
+    H.handle_line("q1"); H.handle_line("q2"); H.handle_line("q3");
+    GenResult tooLong; tooLong.end = "error"; tooLong.text = "api: HTTP 400: context_length_exceeded";
+    b.script = {tooLong, text("recovered")};
+    H.handle_line("q4");
+    HAS(c.all, "recovered");
+    auto& m = b.seen.back();
+    bool has_q1 = false; for (auto& x : m) if (x.content == "q1") has_q1 = true;
+    CHECK(!has_q1); CHECK(m.back().content == "q4"); }
+
 // ---- frozen blocks ----
 TEST(tools_json_has_eight_in_order) {
     std::string t = kToolsJson; size_t pos = 0; std::vector<std::string> names;
