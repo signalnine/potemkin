@@ -17,6 +17,8 @@ struct Q27Opts {
     float temp = 1.0f, top_p = 0.95f, min_p = 0.05f;
     int top_k = 20;
     bool think = true;
+    int think_budget = -1;        // >0: force </think> after this many thinking tokens (q27's
+                                  // --think-budget); off by default, the measured recipe is unbounded
     int n_max = 65536;            // per assistant round, clamped to the window; a shell takes >16K of planning
     bool verbose = false;         // q27's own stderr chatter
 };

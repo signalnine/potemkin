@@ -89,6 +89,7 @@ void usage() {
                  "usage: q27-init --model M.q27 --tok T.tok [--tty /dev/tty1|-] [--root DIR]\n"
                  "                [--sysroot DIR] [--cgroup /sys/fs/cgroup] [--ctx N] [--fixed-stack-gb G]\n"
                  "                [--prefix-cache DIR] [--no-think] [--engine-log FILE] [--dflash2 PACK.d2w]\n"
+                 "                [--think-budget N]\n"
                  "                [--llm cuda|api] [--api-url URL] [--api-model NAME]  (key: PK_API_KEY)\n"
                  "kernel cmdline supplies llm= model= api_url= api_key= api_model=.\n");
 }
@@ -119,6 +120,7 @@ int main(int argc, char** argv) {
         else if (a == "--prefix-cache") qo.prefix_cache = next();
         else if (a == "--dflash2") qo.dflash2 = next();
         else if (a == "--no-think") qo.think = false;
+        else if (a == "--think-budget") qo.think_budget = std::atoi(next().c_str());
         else if (a == "--llm") llm = next();
         else if (a == "--engine-log") engine_log = next();
         else if (a == "--api-url") ao.url = next();
@@ -126,9 +128,13 @@ int main(int argc, char** argv) {
         else { usage(); return 2; }
     }
     if (llm != "cuda" && llm != "api") { std::fprintf(stderr, "q27-init: llm=%s not built yet\n", llm.c_str()); return 2; }
+    if (kc.count("think_budget") && qo.think_budget < 0) qo.think_budget = std::atoi(kc["think_budget"].c_str());
     if (llm == "cuda") {
         // Image defaults: model=qwen|bonsai picks the weights on the persistent disk.
         std::string which = kc.count("model") ? kc["model"] : "bonsai";
+        // Unbounded, Bonsai plans a shell for 65K tokens and writes nothing;
+        // at 8K it writes one in under two minutes. Qwen keeps the recipe.
+        if (which == "bonsai" && qo.think_budget < 0) qo.think_budget = 8192;
         if (qo.model.empty()) qo.model = "/models/" + which + ".q27";
         if (qo.tok.empty()) qo.tok = "/models/qwen38.tok";
         std::string d2 = "/models/" + which + "-dflash2.d2w";

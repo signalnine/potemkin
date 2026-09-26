@@ -37,8 +37,11 @@ the same loop against local GPUs:
 Asked for a shell, Qwen plans for six minutes, writes `sh` plus the `ls`,
 `cat` and `rm` it needs, fixes the shell three times and hands you the
 console. Its `ls` prints every symlink with mode `0777`, and the shell exits
-after the first command. Bonsai plans for sixteen minutes and writes nothing.
-All of this is working as intended.
+after the first command. Unbounded, Bonsai plans for sixteen minutes and
+writes nothing; with an 8K think budget (its default) it writes a working shell
+in under two minutes, then starts it a second time right as you type your
+next question to it, which the shell reports as `how: not found`. All of this
+is working as intended.
 
 Not done: booting the cuda image on bare metal (the procedure is below and
 untested), `llm=cpu`, and the Orin.

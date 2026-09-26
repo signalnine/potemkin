@@ -14,6 +14,139 @@ namespace pk {
 namespace {
 
 using json = nlohmann::json;
+using q27::StreamSplitter;
+
+// Copied verbatim from q27's server.cu (ReasoningBudgetObserver), which keeps
+// it at file scope; see docs/q27-api.md.
+// Reasoning budgets are observed through Engine::on_round before host emission.
+// The whole accepted round is parsed first, so a natural close later in that
+// round wins. When an overshooting round would consume reserved close/answer
+// capacity, only the prefix through the trip is retained and re-finished. On
+// sampled paths that refinish immediately precedes the forced close, so the
+// provisional argmax pending is replaced before any next-token decision.
+struct ReasoningBudgetObserver {
+    q27::Tokenizer& tok;
+    q27::ThinkBudgetState& state;
+    Engine& eng;
+    Engine::DecodeTask& task;
+    const std::vector<int>& close_ids;
+    StreamSplitter split;
+    q27::Utf8Gate gate;
+
+    ReasoningBudgetObserver(q27::Tokenizer& tok_, q27::ThinkBudgetState& state_,
+                            Engine& eng_, Engine::DecodeTask& task_,
+                            const std::vector<int>& close_ids_,
+                            StreamSplitter::Chan initial)
+        : tok(tok_), state(state_), eng(eng_), task(task_), close_ids(close_ids_) {
+        split.chan = initial;
+    }
+
+    void apply(q27::ThinkBudgetAction action, int current_public_tokens = 0,
+               int current_context_tokens = -1) {
+        if (action == q27::ThinkBudgetAction::NONE ||
+            eng.reasoning_transition_active(task))
+            return;
+        eng.force_reasoning_close(
+            task, close_ids, action == q27::ThinkBudgetAction::FORCE_PUBLIC,
+            current_public_tokens, current_context_tokens);
+    }
+
+    void start() { apply(state.start(split.chan)); }
+
+    bool observe_token(q27::ThinkBudgetState& target_state,
+                       StreamSplitter& target_split, q27::Utf8Gate& target_gate,
+                       int id, bool forced) {
+        const auto before = target_split.chan;
+        const auto segments = target_split.feed(target_gate.feed(tok.decode_one(id)));
+        target_state.observe(before, target_split.chan, forced);
+        for (const auto& [ch, text] : segments)
+            if (ch != StreamSplitter::THINK &&
+                text.find_first_not_of(" \t\r\n") != std::string::npos)
+                return true;
+        return false;
+    }
+
+    bool observe_token(int id, bool forced) {
+        return observe_token(state, split, gate, id, forced);
+    }
+
+    int visible_prefix(const int* ids, int n, bool forced, bool* hits_eos) const {
+        *hits_eos = false;
+        if (forced) return n;
+        int visible = std::min(n, std::max(0, task.n_max - task.emitted));
+        for (int i = 0; i < visible; i++)
+            if (ids[i] == task.eos) {
+                *hits_eos = true;
+                return i;
+            }
+        return visible;
+    }
+
+    // Pure planning pass. Tool scanning runs only over the prefix this returns,
+    // so a discarded suffix cannot engage or poison the stateful grammar hook.
+    int preview_round(const int* ids, int n) {
+        const bool forced = task.round_forced;
+        bool hits_eos = false;
+        const int visible = visible_prefix(ids, n, forced, &hits_eos);
+        q27::ThinkBudgetState trial_state = state;
+        StreamSplitter trial_split = split;
+        q27::Utf8Gate trial_gate = gate;
+        int trip_prefix = -1;
+        bool public_answer_after_trip = false;
+        for (int i = 0; i < visible; i++) {
+            const bool emitted_public =
+                observe_token(trial_state, trial_split, trial_gate, ids[i], forced);
+            if (trip_prefix > 0 && emitted_public) public_answer_after_trip = true;
+            if (!forced && trip_prefix < 0 && trial_state.limit >= 0 &&
+                !trial_state.transition_pending &&
+                trial_split.chan == StreamSplitter::THINK &&
+                trial_state.used >= trial_state.limit)
+                trip_prefix = i + 1;
+        }
+        if (hits_eos) return -1;
+
+        const auto action = trial_state.finish_round(trial_split.chan);
+        const bool natural_close_after_trip =
+            trip_prefix > 0 && action == q27::ThinkBudgetAction::NONE &&
+            trial_split.chan != StreamSplitter::THINK;
+        const bool buffered_public_answer =
+            trial_split.chan != StreamSplitter::THINK &&
+            (!trial_gate.pend.empty() ||
+             trial_split.hold.find_first_not_of(" \t\r\n") != std::string::npos);
+        const bool natural_close_keeps_answer = public_answer_after_trip ||
+            buffered_public_answer || task.n_max - task.emitted - visible >= 1;
+        const bool force_full_round_fits =
+            action != q27::ThinkBudgetAction::NONE &&
+            eng.reasoning_close_fits(
+                task, visible, visible, (int)close_ids.size(),
+                action == q27::ThinkBudgetAction::FORCE_PUBLIC);
+        if ((action == q27::ThinkBudgetAction::NONE &&
+             (!natural_close_after_trip || natural_close_keeps_answer)) ||
+            force_full_round_fits)
+            return -1;
+        return trip_prefix > 0 && trip_prefix < n ? trip_prefix : -1;
+    }
+
+    void commit_round(const int* ids, int n) {
+        const bool forced = task.round_forced;
+        bool hits_eos = false;
+        const int visible = visible_prefix(ids, n, forced, &hits_eos);
+        for (int i = 0; i < visible; i++) observe_token(ids[i], forced);
+        // EOS wins immediately. Count only tokens before it, but never queue a
+        // close that post_round cannot commit after taking the EOS exit.
+        if (hits_eos) return;
+        apply(state.finish_round(split.chan), visible, visible);
+    }
+
+    int observe_round(const int* ids, int n) {
+        const int m = preview_round(ids, n);
+        const int kept = (m >= 1 && m < n) ? m : n;
+        commit_round(ids, kept);
+        return m;
+    }
+
+};
+
 using ojson = nlohmann::ordered_json;
 using Chan = q27::StreamSplitter::Chan;
 
@@ -60,6 +193,7 @@ public:
         }
 
         tok_ = std::make_unique<q27::Tokenizer>(o.tok);
+        close_ids_ = tok_->encode("</think>\n\n");
         model_ = std::make_unique<q27::Model>(q27::Model::open(o.model));
         q27::set_tool_dialect_for_model(model_->meta_json);
         dm_ = std::make_unique<q27::DeviceModel>(*model_);
@@ -162,8 +296,18 @@ public:
         prompt.insert(prompt.end(), tail.begin(), tail.end());
         res.prompt_tokens = (int)prompt.size();
 
-        int cap = eng_->max_ctx - (int)prompt.size() - (eng_->ctx_round_reserve() - 1);
-        int n_max = std::min(o_.n_max, cap);
+        const bool budgeted = o_.think && o_.think_budget > 0;
+        int n_max, budget = -1;
+        if (budgeted) {
+            auto lim = q27::resolve_think_decode_limits(o_.n_max, eng_->max_ctx, (int)prompt.size(),
+                                                        eng_->ctx_round_reserve(), (int)close_ids_.size(),
+                                                        true, q27::ThinkCfg{}, o_.think_budget);
+            n_max = lim.n_max;
+            budget = lim.budget;
+        } else {
+            int cap = eng_->max_ctx - (int)prompt.size() - (eng_->ctx_round_reserve() - 1);
+            n_max = std::min(o_.n_max, cap);
+        }
         if (n_max <= 0) { res.end = "ctx-guard"; return res; }
 
         q27k::SampleParams sp{};
@@ -191,10 +335,27 @@ public:
             else segments.emplace_back(ch, t);
         };
         if (o_.think) split.chan = Chan::THINK;
+        q27::ThinkBudgetState tb{budget};
+        ReasoningBudgetObserver observer{*tok_, tb, *eng_, bt, close_ids_, split.chan};
+        struct Unhook { Engine& e; ~Unhook() { e.on_round = nullptr; } } unhook{*eng_};
+        if (budgeted) {
+            observer.start();
+            eng_->on_round = [&](const int* em, int nr) {
+                int bm = observer.preview_round(em, nr);
+                int kept = (bm >= 1 && bm < nr) ? bm : nr;
+                observer.commit_round(em, kept);
+                return kept < nr ? kept : -1;
+            };
+        }
         int n = eng_->generate(prompt, n_max, tok_->eos(), [&](int id) {
-            for (auto& [ch, t] : split.feed(ugate.feed(tok_->decode_one(id)))) route(ch, t);
+            for (auto& [ch, t] : split.feed(ugate.feed(tok_->decode_one(id)))) {
+                // A forced close's own whitespace is not the model's answer.
+                if (bt.callback_forced && ch == Chan::TEXT && q27::strip_ws2(t).empty()) continue;
+                route(ch, t);
+            }
             return !cancel.load();
         }, stable_len, &bt);
+        if (tb.tripped) fprintf(stderr, "q27-init: think budget %d tripped after %d tokens\n", budget, tb.used);
         for (auto& [ch, t] : split.feed(ugate.flush())) route(ch, t);
         bool incomplete = q27::unfinished_tool_wrapper(n, n_max, bt.budget_truncated, split.chan);
         for (auto& [ch, t] : split.flush()) route(ch, t);
@@ -243,6 +404,7 @@ private:
     std::unique_ptr<q27::PrefixCache> pcache_;  // declared before eng_: ~Engine joins its writer
     std::unique_ptr<Engine> eng_;
     json tools_;
+    std::vector<int> close_ids_;
     std::string decl_, name_;
     unsigned long long seed_ = 0;
 };
