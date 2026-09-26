@@ -308,7 +308,15 @@ Host::~Host() {
         if (p.state == "running") { ::kill(-pid, SIGKILL); ::waitpid(pid, nullptr, 0); }
 }
 
-std::string Host::real(const std::string& p) const { return cfg_.root + p; }
+std::string Host::real(const std::string& p) const {
+    // The kernel's views are the machine itself, not part of the village: a
+    // dev root still shows the real /proc, /sys and /dev.
+    for (const char* k : {"/proc", "/sys", "/dev"}) {
+        size_t n = std::strlen(k);
+        if (p.compare(0, n, k) == 0 && (p.size() == n || p[n] == '/')) return p;
+    }
+    return cfg_.root + p;
+}
 
 // Follow symlinks the way the model sees them: absolute targets are model
 // paths, so they get the root prefix again. Identity when root is "".

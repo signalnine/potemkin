@@ -88,6 +88,11 @@ TEST(read_truncates) { Env e; e.cfg.max_result_bytes = 100; Host h(e.cfg); spit(
 TEST(read_binary_hexdump) { Env e; Host h(e.cfg); spit(e.root / "b", std::string("\x7f" "ELF\x02\x01\x01\x00\xff\xfe", 10));
     auto r = h.call("read", {{"path", "/b"}}); HAS(r.body, "[binary: hexdump"); HAS(r.body, "7f 45 4c 46"); }
 TEST(read_missing) { Env e; Host h(e.cfg); HAS(h.call("read", {{"path", "/nope"}}).body, "error:"); }
+TEST(proc_sys_dev_pass_through_root) { Env e; Host h(e.cfg);
+    HAS(h.call("read", {{"path", "/proc/self/status"}}).body, "Name:");
+    HAS(h.call("stat", {{"path", "/sys"}, {"list", "1"}}).body, "class/");
+    HAS(h.call("stat", {{"path", "/dev/null"}}).body, "chardev");
+    CHECK(h.real("/procfoo") == e.root.string() + "/procfoo"); }
 TEST(read_proc) { Config c; c.root = ""; Host h(c);
     auto r = h.call("read", {{"path", "/proc/self/status"}}); HAS(r.body, "Name:"); }
 

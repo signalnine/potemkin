@@ -1,0 +1,172 @@
+// q27-init: the console, the model, and the eight tools. Spawned by /sbin/init
+// on /dev/tty1; also runs on an ordinary terminal for development.
+#include <atomic>
+#include <cerrno>
+#include <csignal>
+#include <cstdio>
+#include <cstring>
+#include <fcntl.h>
+#include <fstream>
+#include <map>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <termios.h>
+#include <unistd.h>
+
+#include "harness/harness.h"
+#include "host/host.h"
+#include "q27/backend_q27.h"
+
+namespace {
+
+std::atomic<bool>* g_cancel = nullptr;
+
+void on_sigint(int) {
+    if (g_cancel) g_cancel->store(true);
+}
+
+class TtyConsole : public pk::Console {
+public:
+    explicit TtyConsole(int fd) : fd_(fd) {}
+    void think(const std::string& s) override { style(true); put(s); }
+    void text(const std::string& s) override { style(false); put(s); }
+    void say(const std::string& s) override { style(false); put(s + "\n"); }
+    void note(const std::string& s) override { style(true); put(s + "\n"); style(false); }
+    // Thinking is dim; switch attributes only on a change, not per token.
+    void style(bool dim) {
+        if (dim == dim_) return;
+        dim_ = dim;
+        put(dim ? "\x1b[2m" : "\x1b[0m");
+    }
+    void put(const std::string& s) {
+        std::string o;
+        for (char c : s) { if (c == '\n') o += '\r'; o += c; }  // survive a raw tty
+        size_t off = 0;
+        while (off < o.size()) {
+            ssize_t w = ::write(fd_, o.data() + off, o.size() - off);
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) break;
+            off += w;
+        }
+    }
+
+private:
+    int fd_;
+    bool dim_ = false;
+};
+
+// Blocking line read in cooked mode. Returns false on EOF.
+bool read_line(int fd, std::string& line) {
+    line.clear();
+    char c;
+    for (;;) {
+        ssize_t r = ::read(fd, &c, 1);
+        if (r < 0 && errno == EINTR) { line.clear(); return true; }  // Ctrl-C at the prompt: drop the line
+        if (r <= 0) return !line.empty();
+        if (c == '\n') return true;
+        line += c;
+    }
+}
+
+std::map<std::string, std::string> kernel_cmdline() {
+    std::map<std::string, std::string> out;
+    std::ifstream f("/proc/cmdline");
+    std::string tok;
+    while (f >> tok) {
+        size_t eq = tok.find('=');
+        if (eq != std::string::npos) out[tok.substr(0, eq)] = tok.substr(eq + 1);
+    }
+    return out;
+}
+
+void usage() {
+    std::fprintf(stderr,
+                 "usage: q27-init --model M.q27 --tok T.tok [--tty /dev/tty1|-] [--root DIR]\n"
+                 "                [--sysroot DIR] [--cgroup /sys/fs/cgroup] [--ctx N] [--fixed-stack-gb G]\n"
+                 "                [--prefix-cache DIR] [--no-think] [--engine-log FILE]\n"
+                 "kernel cmdline (when present) supplies llm= and model= defaults.\n");
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    pk::Q27Opts qo;
+    std::string tty = "-", root, sysroot = "/usr/lib/potemkin", cgroup, engine_log;
+    auto kc = kernel_cmdline();
+    std::string llm = kc.count("llm") ? kc["llm"] : "cuda";
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        auto next = [&]() -> std::string { if (i + 1 >= argc) { usage(); std::exit(2); } return argv[++i]; };
+        if (a == "--model") qo.model = next();
+        else if (a == "--tok") qo.tok = next();
+        else if (a == "--tty") tty = next();
+        else if (a == "--root") root = next();
+        else if (a == "--sysroot") sysroot = next();
+        else if (a == "--cgroup") cgroup = next();
+        else if (a == "--ctx") qo.ctx = std::atoi(next().c_str());
+        else if (a == "--fixed-stack-gb") qo.fixed_stack_gb = std::atof(next().c_str());
+        else if (a == "--prefix-cache") qo.prefix_cache = next();
+        else if (a == "--no-think") qo.think = false;
+        else if (a == "--llm") llm = next();
+        else if (a == "--engine-log") engine_log = next();
+        else { usage(); return 2; }
+    }
+    if (llm != "cuda") { std::fprintf(stderr, "q27-init: llm=%s not built yet\n", llm.c_str()); return 2; }
+    if (qo.model.empty() || qo.tok.empty()) { usage(); return 2; }
+
+    // q27 narrates to stderr; that belongs in a log, not on the console.
+    if (!engine_log.empty()) {
+        int lf = ::open(engine_log.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+        if (lf >= 0) { ::dup2(lf, 2); ::close(lf); }
+    }
+    // The inference process must outlive whatever the model writes.
+    { std::ofstream f("/proc/self/oom_score_adj"); f << "-1000\n"; }
+
+    int fd = 1, in = 0;
+    if (tty != "-") {
+        fd = ::open(tty.c_str(), O_RDWR);
+        if (fd < 0) { std::perror(tty.c_str()); return 1; }
+        in = fd;
+    }
+    TtyConsole con(fd);
+
+    pk::Config hc;
+    hc.root = root;
+    hc.tty_path = tty == "-" ? std::string(::ttyname(0) ? ::ttyname(0) : "/dev/tty") : tty;
+    hc.cgroup_root = cgroup;
+    std::string m = sysroot + "/usr/lib/x86_64-linux-musl", t = sysroot + "/usr/lib/x86_64-linux-gnu/tcc";
+    hc.cc = {sysroot + "/usr/bin/tcc", "-nostdinc", "-nostdlib", "-static",
+             "-I" + sysroot + "/usr/include/x86_64-linux-musl", "-I" + t + "/include",
+             m + "/crt1.o", m + "/crti.o", "@SRC@", m + "/libc.a", t + "/libtcc1.a", m + "/crtn.o"};
+    hc.model_name = qo.model.substr(qo.model.rfind('/') + 1);
+    hc.netboot = llm == "api";
+
+    con.say("loading " + hc.model_name + " ...");
+    std::unique_ptr<pk::Backend> be;
+    try {
+        be = pk::make_q27_backend(qo);
+    } catch (const std::exception& e) {
+        con.say(std::string("model load failed: ") + e.what());
+        return 1;
+    }
+
+    pk::Host host(hc);
+    pk::HarnessConfig cfg;
+    cfg.system_prompt = pk::kSystemPrompt;
+    pk::Harness h(*be, host, con, cfg);
+    g_cancel = &h.cancel;
+    struct sigaction sa {};
+    sa.sa_handler = on_sigint;  // no SA_RESTART: a Ctrl-C at the prompt interrupts the read
+    sigaction(SIGINT, &sa, nullptr);
+    signal(SIGPIPE, SIG_IGN);
+
+    h.boot();
+    std::string line;
+    for (;;) {
+        con.put("\n> ");
+        if (!read_line(in, line)) break;
+        if (h.handle_line(line) == pk::Action::Reboot) return 3;  // init reboots on 3
+    }
+    return 0;
+}
