@@ -2,9 +2,25 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Status
+## Status and commands
 
-Pre-code. The only file is `PotemkinOS — Design Doc.md`, which is the source of truth. No build, lint, or test commands exist yet. Not a git repo yet. Update this file when the first code lands (PoC step 1 is a static-link audit of q27; step 2 is `q27-init`).
+PoC in progress, tracked in bd (`bd ready`, `bd list --all`; prefix `pk`). `PotemkinOS — Design Doc.md` is the source of truth; `docs/link-audit.md` and `docs/q27-api.md` hold measured facts and the q27 call map.
+
+```sh
+bash tools/fetch-toolchain.sh          # tcc + musl -> build/sysroot (apt-get download, no root)
+bash tools/build.sh test               # /sbin/init + CPU unit tests (host, harness, api)
+bash tools/build.sh init               # q27-init, 12g shape (sm_86, W_MAX=8, PF_T=256) -> build/q27-init-sm86
+PROFILE=full bash tools/build.sh init  # tri-arch q27-init -> build/q27-init-smfull
+bash tools/mkimage.sh api|cuda         # initramfs + ext4 persistent disk under build/
+bash tools/run-vm.sh api               # qemu (extracted to build/qemu), serial console
+./build/test_host <substr>             # one test (same for test_harness, test_api)
+```
+
+q27 sources come from `Q27=/mnt/ai/projects/q27-master` (needs its `build/pf4.o`). Models: `/mnt/ai/models/bonsai2-27b/q27/*slim.q27` (pair with the 12g build), `/mnt/ai/models/qwen38-27b-mtp/*.q27`, tokenizer `qwen38-27b-mtp.tok`, DFlash2 pack `/mnt/ai/models/qwen38-27b-dflash2-bf16/qwen38-dflash2-q8-serve.d2w`.
+
+Dev runs: `q27-init --root DIR ...` treats DIR as the village; children are chrooted into it via user+mount namespaces (`Config::isolate`), with /proc /sys /dev passed through. `tools/drive.py` drives the console through a pty (`~text` types into a tty-mode child, `~^]^]` sends the escape chord). Pin GPUs with `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0` (3090) or `=1` (5090); default CUDA ordering puts the 5090 first. The 5090 may be shared with the user's desktop apps; size `--ctx` explicitly there.
+
+Code layout: `src/host` (the eight tools, no CUDA, CONTRACT.md), `src/harness` (agent loop, slash commands, transcript, frozen tools JSON + system prompt), `src/q27` (the only CUDA TU; in-process q27 Engine), `src/api` (OpenAI-compatible SSE backend + fetch), `src/init/init.c` (static PID 1, also `/sbin/rescue`), `src/main.cpp` (q27-init).
 
 ## What this is
 
@@ -16,7 +32,7 @@ Priority order for every decision: funny > working > safe. The failure mode to a
 
 **Process tree.** `/sbin/init` is a ~50-line C supervisor (PID 1: reap, mount `/data /state /generated`, respawn). `q27-init` is a fork of `q27-server` sharing its `Session`; it owns the console on `/dev/tty1` and runs the tool loop. The inference process is never PID 1. The console path never loops back through HTTP (HTTP stays in the build only for remote debugging). `/sbin/rescue` exists via `init=/sbin/rescue` but is not on the model's `PATH`.
 
-**Eight frozen host primitives**: `read`, `write`, `stat`/`walk`, `spawn`, `wait`/`signal`, `compile`, `snapshot`/`rollback`, `fetch` (netboot only). The system+tools block is the prefix-cache cut, so any change to the tool set invalidates every cached conversation. Hard rules that follow from this:
+**Eight frozen host primitives**: `read`, `write`, `stat` (`list=1` walks), `spawn`, `wait` (`signal=` sends first), `compile`, `snapshot` (`rollback=`), `fetch` (netboot only). The JSON block is `kToolsJson` in `src/harness/harness.cpp`. The system+tools block is the prefix-cache cut, so any change to the tool set invalidates every cached conversation. Hard rules that follow from this:
 - No `bash`/shell tool, no dynamic tool registration, no MCP, no "model adds a tool". New capability = model writes a binary and `spawn`s it.
 - No `ps` tool; the model reads `/proc` or writes its own.
 - Skills are never put in the system prompt (would move the cache cut).
@@ -27,7 +43,7 @@ Priority order for every decision: funny > working > safe. The failure mode to a
 
 **spawn modes**: `capture` (buffered, default timeout 60 s), `background` (logs to `/state/log/<pid>`), `tty` (child owns `/dev/tty1`; escape chord `Ctrl-]` twice kills its process group). Every child gets a cgroup v2 `potemkin/<pid>` with `memory.max` (default 512 MB) and `pids.max` (default 256); `q27-init` sets its own `oom_score_adj` to -1000. Harness writes `/state/procs` after every change. `rollback(id)` also kills every child spawned after that snapshot.
 
-**compile + store.** `compile` is content-addressed, not `spawn(tcc)`: `/store/sha256:<hash>/{source.c,bin,manifest.json}`, with `/generated/bin/<name>` symlinked in. Only `c` in v1. The store is append-only and is the only source tree / reproducibility ledger.
+**compile + store.** `compile` is content-addressed, not `spawn(tcc)`: `/store/sha256:<hash>/{source.c,bin,manifest.json}`, with `/generated/bin/<name>` symlinked in. Only `c` in v1. The store is append-only and is the only source tree / reproducibility ledger. Snapshots are copy-based (`/snapshots/<id>`), the prefix cache lives in `/cache` (not snapshotted), `/intent/log` is the intent file. See the design doc's Implementation notes for other deviations.
 
 **Filesystem.** Persistent: `/data` (not snapshotted), `/state` and `/generated` (snapshotted per turn via btrfs subvolumes, overlayfs on VM), `/store` (append-only), `/intent` (append-only log, never enforced). Everything else is read-only initramfs. Snapshot happens before any turn that calls `write`, `spawn`, or `compile`.
 

@@ -255,6 +255,22 @@ Small on purpose. Each step is demoable before the next starts.
 7. **Orin Nano Super.** Recompile for sm\_87, tune single-slot memory, L4T kernel. Last, because it is the least novel and the most fiddly.
 8. **README.** The definition, the trusted-base table, the Orin caveats, and the Stretch section as "someday."
 
+## Implementation notes (PoC, 2026-09-26)
+
+Where the build had to pick, or differs from the text above:
+
+- **Tool shape.** Eight names, frozen: `read write stat spawn wait compile snapshot fetch`. The paired rows are flags: `stat(list=1)` walks, `wait(signal=)` signals first, `snapshot(rollback=)` rolls back. `compile(lang, name, source, opts)` takes one source as raw text.
+- **`tty` mode is a pty proxy.** The child gets its own pty and the harness shuttles bytes to the console, because the escape chord and the last ~2K of output both need something in the middle. The console is in raw mode only while proxying.
+- **Console is cooked mode, not raw.** The kernel line discipline gives echo and backspace for free and ISIG turns Ctrl-C into SIGINT, which cancels generation.
+- **No `ip=dhcp`.** The stock distro kernel lacks `CONFIG_IP_PNP`. `/sbin/init` sets a static address from `potemkin.net=A.B.C.D/N,GW,DNS` (enough for QEMU user networking); DHCP needs either a custom kernel or a DHCP client in init.
+- **Snapshots are copies** of `/generated` and `/state` into `/snapshots/<id>`, taken lazily before the first `write`/`spawn`/`compile` of a turn. `/undo` also rewinds the conversation (the transcript lives in `/state`); a model-initiated rollback keeps the model's memory. btrfs subvolumes are a performance upgrade, not a semantic one.
+- **Prefix cache lives in `/cache`**, persistent but not snapshotted, so multi-GB cache files are not copied every turn. Restart restore verified (14161 tokens restored on the first request after a restart).
+- **`/intent` is a directory** holding `log`. Persistent trees on the disk: `data state generated store intent cache snapshots models`.
+- **Rescue is `/sbin/init` under another name**, with a three-item menu: roll back to the newest snapshot, move `/generated` aside, reboot.
+- **`llm=api` speaks OpenAI-compatible chat/completions** (SSE), which covers OpenAI, vLLM, llama.cpp, OpenRouter and q27-server. `api_url=`, `api_key=`, `api_model=` on the cmdline.
+- **System prompt nudge.** With `stat(list=1)` available the model answered "what's on this disk" itself instead of writing `ls`. The prompt now says the tools are for the model and the user only sees programs, with that exact example. Bonsai and Qwen both write `ls` after it.
+- **Dev mode.** `q27-init --root DIR` runs against a directory; spawned programs are chrooted into it through a user namespace, so a village can be tested without rebooting the workstation.
+
 ## Open questions
 
 Answered by a read of the q27 repo (2026-09-25):
