@@ -1,2 +1,4 @@
 .dolt/
 *.db
+build/
+third_party/debs/
