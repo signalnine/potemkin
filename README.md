@@ -9,6 +9,13 @@ kernel, an inference engine ([q27](https://github.com/signalnine/q27)), a C
 compiler, and a prompt. Ask for what you want and the model writes a facade of
 a userland in front of you. Every install is a different village.
 
+![A fresh village: the model writes ls, then a shell, then hands over the console](docs/demo.gif)
+
+Qwen3.8-27B on an RTX 5090, first boot of an empty village: 17 minutes of wall
+time, played at 5x with thinking at 60x. Asked for a shell, it also wrote
+`ptytest`, `procscan` and `fdscan` to debug its own shell before handing over
+the console.
+
 ```text
 [ potemkin/1 ]
 
@@ -109,7 +116,9 @@ village as `/` the same way they would on the image.
   --root /tmp/village --sysroot $PWD/build/sysroot --ctx 131072 --engine-log /tmp/engine.log
 ```
 
-`tools/drive.py` types into it through a pty for scripted runs.
+`tools/drive.py` types into it through a pty for scripted runs; `--cast FILE`
+records an asciicast, and `tools/cast2gif.py FILE out.gif` renders it (Pillow
+and ffmpeg).
 
 ### On real hardware (llm=cuda)
 
