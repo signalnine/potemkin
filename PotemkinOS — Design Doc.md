@@ -28,10 +28,10 @@ The image ships only what the model cannot write for itself because it needs it 
 
 | Component | Why it ships | Size (approx) |
 | --- | --- | --- |
-| Linux kernel + initramfs | Not writing a kernel. Stock config lacks `CONFIG_IP_PNP`, so `ip=dhcp` needs a custom kernel | 17 MB kernel |
+| Linux kernel + initramfs | Not writing a kernel. Stock distro kernel works; `/sbin/init` does DHCP because the kernel lacks `CONFIG_IP_PNP` | 17 MB kernel |
 | NVIDIA modules + libcuda + firmware | Hardware enablement, same class as the kernel. `nvidia` + `nvidia-uvm` only; no modeset/drm needed for compute | LOL (190 MB measured: 96 libcuda, 72 GSP fw, 23 modules; +39 MB PTX JIT if shipped) |
 | glibc (dynamic), CUDA static libs | What q27 links against. Fully static is impossible: cudart `dlopen`s libcuda, which needs glibc. libstdc++/libgcc linked static | ~6 MB |
-| `q27-init` | The engine, the tool loop, the console | ~11 MB (sm_86-only 12g build) |
+| `q27-init` | The engine, the tool loop, the console, static OpenSSL for `llm=api` | ~18 MB (sm_86-only 12g build) |
 | Qwen3.8-27B (Q4, \~17 GB) + DFlash2 Q8 pack (2.1 GB), or Bonsai 2 27B (\~6 GB), + tokenizer | The distribution *is* the weights | 6–23 GB |
 | tcc + musl headers | The model needs a C compiler; tcc is \~100 KB and has `-run` | < 1 MB |
 | Rescue init (`/sbin/rescue`) | `init=/sbin/rescue` on the cmdline; not on the model's `PATH`, not visible to it | small |
@@ -128,7 +128,7 @@ Enough to keep the model alive and the console usable. Not a sandbox.
 
 **Process table.** The harness writes `/state/procs` (pid, mode, argv, turn that spawned it, state) after every change. The model reads it like any file; the kernel view in `/proc` stays the ground truth. No `ps` tool, still.
 
-**Reaping.** `q27-init` waits on its own children; anything that reparents to PID 1 the supervisor reaps. Background children are not restarted by anyone — if the model wants supervision it writes a supervisor.
+**Reaping.** `q27-init` waits on its own children; anything that reparents to PID 1 the supervisor reaps. Nobody restarts background children. If the model wants supervision it writes a supervisor.
 
 **Rollback kills.** `rollback(id)` restores `/generated` and `/state` and also kills every child spawned after that snapshot. A process from a future that no longer exists is worse than no process.
 
@@ -198,7 +198,7 @@ One image, backend and model chosen on the kernel cmdline: `llm=api|cuda|cpu`, `
 | --- | --- | --- | --- | --- |
 | VM (most users) | `cpu` | Bonsai 2 27B (`bonsai`) | low single digits | Ternary matmul is add/sub only; vibecoded AVX2 kernel. This is where the cursed screenshots come from |
 | VM, opt-in | `api` | Anthropic / OpenAI | fast | Competent userland. Different joke: the OS is a thin client with an API key in the boot args |
-| RTX 5090 / 4090 / 3090 | `cuda` | Qwen3.8-27B-MTP default tier (17 GB) + DFlash2 Q8 pack (`qwen`) | 5090: 228–232 measured (DFlash2, K=7). 3090: 102 measured (MTP ladder, w8 build, q4s tier) | Tri-arch binary (sm\_86/89/120, runtime dispatch), CUDA statically linked, driver r580+. On 24 GB: q4s tier (15.7 GB) + 2.1 GB drafter + KV is tight; measure whether DFlash2 fits or the 3090 runs the MTP ladder |
+| RTX 5090 / 4090 / 3090 | `cuda` | Qwen3.8-27B-MTP default tier (17 GB) + DFlash2 Q8 pack (`qwen`) | 5090: 228–232 measured (DFlash2, K=7). 3090: 102 measured (MTP ladder, w8 build, q4s tier) | Tri-arch binary (sm\_86/89/120, runtime dispatch), CUDA statically linked, driver r580+. On 24 GB DFlash2 fits with the W_MAX=8 build: 94K window, 162-169 t/s (see Open questions) |
 | RTX 3060 and other ≤12 GB | `cuda` | Bonsai 2 27B (`bonsai`) | 49 (measured) | Already works. sm\_86 |
 | Orin Nano Super | `cuda` | Bonsai 2 27B (`bonsai`) | \~8-14 est. | sm\_87, same gen as 3060. 6 GB weights + KV in 8 GB shared. Single slot, short context |
 
@@ -257,19 +257,21 @@ Small on purpose. Each step is demoable before the next starts.
 
 ## Implementation notes (PoC, 2026-09-26)
 
-Where the build had to pick, or differs from the text above:
+Where the build had to pick, or where it differs from the text above:
 
-- **Tool shape.** Eight names, frozen: `read write stat spawn wait compile snapshot fetch`. The paired rows are flags: `stat(list=1)` walks, `wait(signal=)` signals first, `snapshot(rollback=)` rolls back. `compile(lang, name, source, opts)` takes one source as raw text.
-- **`tty` mode is a pty proxy.** The child gets its own pty and the harness shuttles bytes to the console, because the escape chord and the last ~2K of output both need something in the middle. The console is in raw mode only while proxying.
-- **Console is cooked mode, not raw.** The kernel line discipline gives echo and backspace for free and ISIG turns Ctrl-C into SIGINT, which cancels generation.
-- **`ip=dhcp` is done by `/sbin/init`, not the kernel.** The stock distro kernel lacks `CONFIG_IP_PNP`, so init carries a ~100-line DHCP client (DISCOVER/OFFER/REQUEST/ACK on a UDP socket bound to the first non-lo interface). `ip=dhcp` or `potemkin.net=dhcp` asks the LAN; `potemkin.net=A.B.C.D/N,GW,DNS` sets a static address. Verified against QEMU's DHCP server.
-- **Snapshots are copies** of `/generated` and `/state` into `/snapshots/<id>`, taken lazily before the first `write`/`spawn`/`compile` of a turn. `/undo` also rewinds the conversation (the transcript lives in `/state`); a model-initiated rollback keeps the model's memory. btrfs subvolumes are a performance upgrade, not a semantic one.
-- **Prefix cache lives in `/cache`**, persistent but not snapshotted, so multi-GB cache files are not copied every turn. Restart restore verified (14161 tokens restored on the first request after a restart).
-- **`/intent` is a directory** holding `log`. Persistent trees on the disk: `data state generated store intent cache snapshots models`.
+- **Tool shape.** Eight names, frozen: `read write stat spawn wait compile snapshot fetch`. The paired rows became flags: `stat(list=1)` walks, `wait(signal=)` signals first, `snapshot(rollback=)` rolls back. `compile(lang, name, source, opts)` takes one source as raw text.
+- **`tty` mode is a pty proxy.** The child gets its own pty and the harness shuttles bytes to the console, because the escape chord and the last ~2K of output both need something in the middle. The console goes raw only while proxying.
+- **The console runs in cooked mode.** The kernel line discipline gives echo and backspace for free, and ISIG turns Ctrl-C into SIGINT, which cancels generation.
+- **`/sbin/init` does DHCP.** The stock distro kernel lacks `CONFIG_IP_PNP`, so init carries a ~100-line client (DISCOVER/OFFER/REQUEST/ACK on a UDP socket bound to the first non-lo interface). `ip=dhcp` or `potemkin.net=dhcp` asks the LAN; `potemkin.net=A.B.C.D/N,GW,DNS` sets a static address. Tested against QEMU's DHCP server.
+- **Snapshots are copies** of `/generated` and `/state` into `/snapshots/<id>`, taken right before the first `write`/`spawn`/`compile` of a turn. `/undo` rewinds the conversation too, since the transcript and the undo stack live in `/state`; a rollback the model asks for keeps its memory. btrfs subvolumes would only make snapshots cheaper.
+- **The prefix cache lives in `/cache`**, persistent and outside the snapshots, so multi-GB cache files never get copied per turn. A restart restored 14,161 tokens from disk on its first request.
+- **`/intent` is a directory** holding `log`. The persistent disk holds `data state generated store intent cache snapshots models`.
 - **Rescue is `/sbin/init` under another name**, with a three-item menu: roll back to the newest snapshot, move `/generated` aside, reboot.
-- **`llm=api` speaks OpenAI-compatible chat/completions** (SSE), which covers OpenAI, vLLM, llama.cpp, OpenRouter and q27-server. `api_url=`, `api_key=`, `api_model=` on the cmdline.
-- **System prompt nudge.** With `stat(list=1)` available the model answered "what's on this disk" itself instead of writing `ls`. The prompt now says the tools are for the model and the user only sees programs, with that exact example. Bonsai and Qwen both write `ls` after it.
-- **Dev mode.** `q27-init --root DIR` runs against a directory; spawned programs are chrooted into it through a user namespace, so a village can be tested without rebooting the workstation.
+- **`llm=api` speaks OpenAI-compatible chat/completions** over SSE, which covers OpenAI, vLLM, llama.cpp, OpenRouter and q27-server. `api_url=`, `api_key=`, `api_model=` go on the cmdline.
+- **System prompt nudge.** With `stat(list=1)` available, the model answered "what's on this disk" itself and never wrote `ls`, which deletes the punchline. The prompt now tells it the tools are for it, the user only sees programs, and "what's on this disk" means it is missing `ls`. Both models write `ls` after that.
+- **Dev mode.** `q27-init --root DIR` runs against a directory, and spawned programs get chrooted into it through a user namespace, so a village runs without rebooting the workstation.
+- **Models think a lot.** Asked for a shell, Bonsai spent a full 65,536-token round planning and wrote nothing; Qwen planned for 33K tokens and then wrote a working one. The per-round cap is 64K for that reason. Whether Bonsai gets a think budget is still open.
+- **Compaction lies.** A summary written after a cut-off turn claimed a shell had been built and tested, with an invented store hash, and the model then invented a rollback to explain where it went. The harness now appends the real `/generated/bin` listing to every summary. The model keeps its facade; the ledger keeps the facts.
 
 ## Open questions
 
@@ -289,6 +291,6 @@ Still open:
 - [ ] Bonsai 2 on Orin: does 6 GB weights + KV + kernel + `q27-init` actually fit in 8 GB shared at a usable context length? Needs a measurement, not an estimate.
 - [x] DFlash2 on 24 GB: **fits.** Measured 2026-09-26 on a bare 3090 with the tri-arch W_MAX=8 build (the W12 graph set OOMs on 24 GB): q4s + DFlash2 Q8 + 3 GB reserve auto-sizes to a 94,208-token turbo5k window and decodes at 162-169 t/s on codegen; the MTP ladder on the same card gets 262,144 tokens at 98-118 t/s.
 - [x] MTP heads **survive ternary quant.** Measured 2026-09-26 on a 3090 with the 12g build: `bonsai2-27b-t3-mtp-slim` (6.49 GB) accepts 3.2-5.3 tokens/round and decodes at 104-148 t/s, against 75 t/s for the plain `t3-slim` pack (6.06 GB). Default `model=bonsai` to the MTP pack where it fits; the q27 installer notes it may not fit an 8 GB card with a desktop on it.
-- [ ] tcc vs. a bigger compiler. tcc's C subset may frustrate a 27B that keeps reaching for GNU extensions. If it does, the fallback is shipping gcc and admitting it.
+- [ ] tcc vs. a bigger compiler. tcc's C subset may frustrate a 27B that keeps reaching for GNU extensions. If it does, the fallback is shipping gcc and admitting it. So far (2026-09-26, ~15 compiles across both models) every failure was the model's own C: a `S_IFBTK` typo, a missing `errno.h`, `localtime_r(time(0))` by value. Nothing hit a tcc limit.
 - [ ] Is `ip=dhcp` enough for the VM, or do people need the model to bring up wifi on bare metal? Wifi is a lot of userland to vibecode.
-- [ ] The tool-call parser recovers 22 catalogued drift modes for the qwen35 XML dialect. The eight PotemkinOS tools need to be rendered in that dialect, not a new one, or the drift corpus stops protecting you.
+- [x] The eight tools render through q27's own `openai_tools_decl`/`chatml_prompt` path in the qwen38 XML dialect, so the drift corpus still covers them. Raw multi-line parameters confirmed in the parser; C source rides unescaped.

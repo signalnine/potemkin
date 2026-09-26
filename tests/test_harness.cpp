@@ -280,6 +280,14 @@ TEST(undo_survives_restart) { Env e;
     H.handle_line("/undo");
     LACKS(c.all, "nothing to undo"); CHECK(!fs::exists(e.root / "generated/a")); }
 
+TEST(transcript_saved_every_round) { Env e; Host h(e.hc); FakeBackend b; CaptureConsole c; Harness H(b, h, c, e.cfg);
+    b.script = {calls({call("write", {{"path", "/data/a"}, {"content", "1"}})}), text("done")};
+    std::string mid;
+    int n = 0;
+    b.during = [&] { if (++n == 2) mid = slurp(e.root / "state/transcript.jsonl"); };
+    H.handle_line("go");
+    HAS(mid, "wrote 1 bytes"); HAS(mid, "\"go\""); }
+
 // ---- frozen blocks ----
 TEST(tools_json_has_eight_in_order) {
     std::string t = kToolsJson; size_t pos = 0; std::vector<std::string> names;

@@ -279,6 +279,7 @@ void Harness::user_turn(const std::string& content, const std::string& intent) {
             break;
         }
         for (auto& c : r.calls) run_call(c);
+        save_transcript();  // a turn can run for an hour; a crash mid-turn keeps the rounds
     }
     save_transcript();
     maybe_compact(last);
