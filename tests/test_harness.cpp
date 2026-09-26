@@ -272,6 +272,14 @@ TEST(backend_error_first_round_drops_turn) { Env e; Host h(e.hc); FakeBackend b;
     H.handle_line("go");
     CHECK(H.messages().size() == 1); }
 
+TEST(undo_survives_restart) { Env e;
+    { Host h(e.hc); FakeBackend b; CaptureConsole c; Harness H(b, h, c, e.cfg);
+      b.script = {calls({call("write", {{"path", "/generated/a"}, {"content", "1"}})}), text("ok")};
+      H.handle_line("make a"); }
+    Host h(e.hc); FakeBackend b; CaptureConsole c; Harness H(b, h, c, e.cfg); H.boot();
+    H.handle_line("/undo");
+    LACKS(c.all, "nothing to undo"); CHECK(!fs::exists(e.root / "generated/a")); }
+
 // ---- frozen blocks ----
 TEST(tools_json_has_eight_in_order) {
     std::string t = kToolsJson; size_t pos = 0; std::vector<std::string> names;

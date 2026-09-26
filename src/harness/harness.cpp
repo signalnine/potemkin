@@ -168,18 +168,25 @@ void Harness::save_transcript() {
     { std::ofstream f(tmp, std::ios::binary | std::ios::trunc); f << out; }
     fs::rename(tmp, p, ec);
     std::ofstream(host_.real("/state/turn"), std::ios::trunc) << turn_ << "\n";
+    // /state is itself snapshotted, so rolling back to snapshot N restores the
+    // stack as it was before N was pushed: exactly the ids still undoable.
+    std::ofstream u(host_.real("/state/undo"), std::ios::trunc);
+    for (int id : undo_stack_) u << id << "\n";
 }
 
 bool Harness::load_transcript() {
     msgs_.resize(1);
     std::ifstream f(host_.real("/state/transcript.jsonl"));
-    if (!f) { turn_ = 0; return false; }
+    if (!f) { turn_ = 0; undo_stack_.clear(); return false; }
     std::string line;
     while (std::getline(f, line)) {
         Message m;
         if (message_from_json(line, m)) msgs_.push_back(m);
     }
     turn_ = std::atoi(slurp(host_.real("/state/turn")).c_str());
+    undo_stack_.clear();
+    std::istringstream u(slurp(host_.real("/state/undo")));
+    for (int id; u >> id;) undo_stack_.push_back(id);
     return msgs_.size() > 1;
 }
 
