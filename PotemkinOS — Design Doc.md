@@ -26,14 +26,16 @@ The image ships only what the model cannot write for itself because it needs it 
 
 | Component | Why it ships | Size (approx) |
 | --- | --- | --- |
-| Linux kernel + initramfs | Not writing a kernel | tens of MB |
-| NVIDIA modules + libcuda + firmware | Hardware enablement, same class as the kernel | LOL |
-| libc, CUDA static libs | What q27 links against | tens of MB |
-| `q27-init` | The engine, the tool loop, the console | small |
+| Linux kernel + initramfs | Not writing a kernel. Stock config lacks `CONFIG_IP_PNP`, so `ip=dhcp` needs a custom kernel | 17 MB kernel |
+| NVIDIA modules + libcuda + firmware | Hardware enablement, same class as the kernel. `nvidia` + `nvidia-uvm` only; no modeset/drm needed for compute | LOL (190 MB measured: 96 libcuda, 72 GSP fw, 23 modules; +39 MB PTX JIT if shipped) |
+| glibc (dynamic), CUDA static libs | What q27 links against. Fully static is impossible: cudart `dlopen`s libcuda, which needs glibc. libstdc++/libgcc linked static | ~6 MB |
+| `q27-init` | The engine, the tool loop, the console | ~11 MB (sm_86-only 12g build) |
 | Qwen3.8-27B (Q4, \~17 GB) + DFlash2 Q8 pack (2.1 GB), or Bonsai 2 27B (\~6 GB), + tokenizer | The distribution *is* the weights | 6–23 GB |
 | tcc + musl headers | The model needs a C compiler; tcc is \~100 KB and has `-run` | < 1 MB |
 | Rescue init (`/sbin/rescue`) | `init=/sbin/rescue` on the cmdline; not on the model's `PATH`, not visible to it | small |
 | Certificates | Netboot mode only | small |
+
+Measured 2026-09-25 for the Bonsai/3060 path: see `docs/link-audit.md`.
 
 Not shipped: BusyBox, coreutils, any shell, `make`, `git`, `curl`, `python`, `systemd`, a package database, `/bin`.
 
