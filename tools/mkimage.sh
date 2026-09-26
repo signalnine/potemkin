@@ -16,7 +16,7 @@ mkdir -p "$stage"/{sbin,usr/bin,usr/lib,lib64,lib/x86_64-linux-gnu,etc/ssl/certs
 install -m 0755 build/init "$stage/sbin/init"
 ln "$stage/sbin/init" "$stage/sbin/rescue"
 ln -s sbin/init "$stage/init"  # the kernel runs /init from an initramfs
-install -m 0755 "build/q27-init-sm$ARCH" "$stage/usr/bin/q27-init"
+install -m 0755 "build/q27-init-sm$ARCH" "$stage/usr/bin/q27-init"  # ARCH=86 (12g) or full
 strip "$stage/usr/bin/q27-init" "$stage/sbin/init" 2>/dev/null || true
 
 # glibc: what q27-init, tcc and libcuda load (docs/link-audit.md).
@@ -36,7 +36,7 @@ fi
 
 if [[ $flavor == cuda ]]; then
   kver=${KVER:-$(uname -r)}
-  drv=$(cat /proc/driver/nvidia/version | sed -n 's/.*Module  *\([0-9.]*\).*/\1/p')
+  drv=$(modinfo -k "$kver" -F version nvidia)
   mkdir -p "$stage/lib/modules/potemkin" "$stage/lib/firmware/nvidia/$drv"
   for m in nvidia nvidia-uvm; do
     src=$(modinfo -k "$kver" -n "$m")

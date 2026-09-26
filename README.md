@@ -69,7 +69,7 @@ bash tools/build.sh test               # init + unit tests (CPU only)
 bash tools/build.sh init               # q27-init, 12g shape (sm_86, slim packs)
 PROFILE=full bash tools/build.sh init  # q27-init, tri-arch (sm_86/89/120)
 bash tools/mkimage.sh api              # initramfs + persistent disk
-bash tools/run-vm.sh api               # boot it in qemu (serial console)
+bash tools/run-vm.sh api               # boot it in qemu (serial console); NET=dhcp to lease
 ```
 
 Run a single test: `./build/test_host <name-substring>` (same for

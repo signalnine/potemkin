@@ -9,6 +9,7 @@
 //   potemkin.disk=/dev/vda        persistent disk (ext4 or btrfs), default /dev/vda
 //   potemkin.tty=/dev/tty1        console for q27-init
 //   potemkin.net=A.B.C.D/N,GW,DNS static address for the first non-lo interface
+//   potemkin.net=dhcp (or ip=dhcp)  ask the LAN; the kernel's own ip= needs CONFIG_IP_PNP
 //   llm= model= api_key= api_url= read by q27-init itself
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -27,7 +28,9 @@
 #include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/socket.h>
+#include <stdint.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
 #include <sys/wait.h>
@@ -130,7 +133,7 @@ static void nvidia_nodes(void) {
 static void ifup(int s, const char* ifname, const char* addr, int prefix) {
     struct ifreq ifr;
     memset(&ifr, 0, sizeof ifr);
-    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+    snprintf(ifr.ifr_name, IFNAMSIZ, "%s", ifname);
     if (addr) {
         struct sockaddr_in* sin = (struct sockaddr_in*)&ifr.ifr_addr;
         sin->sin_family = AF_INET;
@@ -145,14 +148,121 @@ static void ifup(int s, const char* ifname, const char* addr, int prefix) {
     ioctl(s, SIOCSIFFLAGS, &ifr);
 }
 
+// Minimal DHCP (RFC 2131): DISCOVER, OFFER, REQUEST, ACK over a UDP socket
+// bound to the interface, broadcast flag set so replies come back broadcast.
+// Fills spec with "A.B.C.D/N,GW,DNS". Returns 0 on success.
+struct dhcp {
+    uint8_t op, htype, hlen, hops;
+    uint32_t xid;
+    uint16_t secs, flags;
+    uint32_t ciaddr, yiaddr, siaddr, giaddr;
+    uint8_t chaddr[16], sname[64], file[128];
+    uint8_t magic[4], opts[312];
+} __attribute__((packed));
+
+static int dhcp_opt(const struct dhcp* d, size_t len, uint8_t code, uint8_t* out, int max) {
+    const uint8_t* p = d->opts;
+    const uint8_t* end = (const uint8_t*)d + len;
+    while (p < end && *p != 255) {
+        if (*p == 0) { ++p; continue; }
+        if (p + 1 >= end || p + 2 + p[1] > end) break;
+        if (p[0] == code) { int n = p[1] < max ? p[1] : max; memcpy(out, p + 2, n); return n; }
+        p += 2 + p[1];
+    }
+    return 0;
+}
+
+static int dhcp_lease(const char* ifname, char* spec, size_t speclen) {
+    int s = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (s < 0) return -1;
+    int one = 1;
+    setsockopt(s, SOL_SOCKET, SO_BROADCAST, &one, sizeof one);
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    setsockopt(s, SOL_SOCKET, SO_BINDTODEVICE, ifname, strlen(ifname) + 1);
+    struct timeval tv = {2, 0};
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    struct sockaddr_in me = {.sin_family = AF_INET, .sin_port = htons(68)};
+    if (bind(s, (struct sockaddr*)&me, sizeof me) != 0) { close(s); return -1; }
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof ifr);
+    snprintf(ifr.ifr_name, IFNAMSIZ, "%s", ifname);
+    ioctl(s, SIOCGIFHWADDR, &ifr);
+    struct sockaddr_in bc = {.sin_family = AF_INET, .sin_port = htons(67), .sin_addr.s_addr = INADDR_BROADCAST};
+    uint32_t xid = (uint32_t)time(NULL) ^ (uint32_t)getpid() ^ 0x506f746d;
+    uint32_t offered = 0, server = 0;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        for (int phase = offered ? 1 : 0; phase < 2; ++phase) {
+            struct dhcp q;
+            memset(&q, 0, sizeof q);
+            q.op = 1; q.htype = 1; q.hlen = 6; q.xid = xid; q.flags = htons(0x8000);
+            memcpy(q.chaddr, ifr.ifr_hwaddr.sa_data, 6);
+            q.magic[0] = 99; q.magic[1] = 130; q.magic[2] = 83; q.magic[3] = 99;
+            uint8_t* o = q.opts;
+            *o++ = 53; *o++ = 1; *o++ = phase ? 3 : 1;  // REQUEST : DISCOVER
+            if (phase) {
+                *o++ = 50; *o++ = 4; memcpy(o, &offered, 4); o += 4;
+                *o++ = 54; *o++ = 4; memcpy(o, &server, 4); o += 4;
+            }
+            *o++ = 55; *o++ = 3; *o++ = 1; *o++ = 3; *o++ = 6;
+            *o++ = 255;
+            sendto(s, &q, sizeof q, 0, (struct sockaddr*)&bc, sizeof bc);
+            struct dhcp r;
+            ssize_t n;
+            int want = phase ? 5 : 2;  // ACK : OFFER
+            int got = 0;
+            while ((n = recv(s, &r, sizeof r, 0)) > 0) {
+                uint8_t type = 0;
+                if (r.op != 2 || r.xid != xid || !dhcp_opt(&r, n, 53, &type, 1)) continue;
+                if (type == 6) break;  // NAK: start over
+                if (type != want) continue;
+                got = 1;
+                break;
+            }
+            if (!got) { offered = 0; break; }
+            if (!phase) {
+                offered = r.yiaddr;
+                dhcp_opt(&r, n, 54, (uint8_t*)&server, 4);
+                continue;
+            }
+            uint32_t mask = htonl(0xffffff00), gw = 0, dns = 0;
+            dhcp_opt(&r, n, 1, (uint8_t*)&mask, 4);
+            dhcp_opt(&r, n, 3, (uint8_t*)&gw, 4);
+            dhcp_opt(&r, n, 6, (uint8_t*)&dns, 4);
+            char a[16], g[16], d[16];
+            inet_ntop(AF_INET, &r.yiaddr, a, sizeof a);
+            inet_ntop(AF_INET, &gw, g, sizeof g);
+            inet_ntop(AF_INET, &dns, d, sizeof d);
+            snprintf(spec, speclen, "%s/%d,%s,%s", a, __builtin_popcount(mask), g, d);
+            close(s);
+            return 0;
+        }
+    }
+    close(s);
+    return -1;
+}
+
 static void net(void) {
     int s = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (s < 0) return;
     ifup(s, "lo", "127.0.0.1", 8);
     const char* spec = arg("potemkin.net", NULL);
+    if (!spec && !strcmp(arg("ip", ""), "dhcp")) spec = "dhcp";
     if (!spec) { close(s); return; }
     char buf[256];
-    snprintf(buf, sizeof buf, "%s", spec);
+    if (!strcmp(spec, "dhcp")) {
+        char ifn[IFNAMSIZ] = "";
+        DIR* dd = opendir("/sys/class/net");
+        struct dirent* de;
+        while (dd && (de = readdir(dd)))
+            if (de->d_name[0] != '.' && strcmp(de->d_name, "lo")) { snprintf(ifn, sizeof ifn, "%.15s", de->d_name); break; }
+        if (dd) closedir(dd);
+        if (!ifn[0]) { say("init: dhcp: no interface\n"); close(s); return; }
+        ifup(s, ifn, NULL, 0);
+        if (dhcp_lease(ifn, buf, sizeof buf) != 0) { say("init: dhcp on %s: no lease\n", ifn); close(s); return; }
+        say("init: dhcp lease %s\n", buf);
+    } else {
+        snprintf(buf, sizeof buf, "%s", spec);
+    }
     char* addr = strtok(buf, ",");
     char* gw = strtok(NULL, ",");
     char* dns = strtok(NULL, ",");

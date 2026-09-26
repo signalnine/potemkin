@@ -9,7 +9,7 @@ flavor=${1:-api}
 shift || true
 Q=build/qemu
 KERNEL=${KERNEL:-$(ls build/kernel/boot/vmlinuz-* | head -1)}
-append="console=ttyS0 potemkin.tty=/dev/ttyS0 potemkin.net=10.0.2.15/24,10.0.2.2,10.0.2.3 llm=$flavor"
+append="console=ttyS0 potemkin.tty=/dev/ttyS0 potemkin.net=${NET:-10.0.2.15/24,10.0.2.2,10.0.2.3} llm=$flavor"
 if [[ $flavor == api ]]; then
   append+=" api_url=${API_URL:-http://10.0.2.2:8090/v1} api_model=${API_MODEL:-bonsai2-27b-t3-slim}"
 fi
