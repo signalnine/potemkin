@@ -280,15 +280,20 @@ void Harness::user_turn(const std::string& content, const std::string& intent) {
         }
         for (auto& c : r.calls) run_call(c);
         save_transcript();  // a turn can run for an hour; a crash mid-turn keeps the rounds
+        // Turns like "form a cluster" never end, so compaction also runs
+        // between rounds, where the history is at a clean ChatML boundary.
+        if (maybe_compact(r))
+            msgs_.push_back({"user", "[harness] The conversation was compacted in the middle of this task. "
+                                     "Continue where you left off.", "", {}});
     }
     save_transcript();
     maybe_compact(last);
     ::sync();  // the VM can be killed and the power can go out; undo has to survive both
 }
 
-void Harness::maybe_compact(const GenResult& r) {
+bool Harness::maybe_compact(const GenResult& r) {
     int used = r.prompt_tokens + r.gen_tokens;
-    if (used <= cfg_.compact_at * be_.context_limit() || msgs_.size() < 3) return;
+    if (used <= cfg_.compact_at * be_.context_limit() || msgs_.size() < 3) return false;
     con_.note("  (compacting the conversation)");
     std::vector<Message> req = msgs_;
     req.push_back({"user", kCompactPrompt, "", {}});
@@ -307,7 +312,7 @@ void Harness::maybe_compact(const GenResult& r) {
                                  "conversation was dropped. /intent/log and /state/summaries still have it.", "", {}});
         msgs_.insert(msgs_.end(), kept.begin(), kept.end());
         save_transcript();
-        return;
+        return true;
     }
     std::ofstream(host_.real("/state/summaries"), std::ios::app) << "--- " << now_iso() << " turn=" << turn_ << "\n"
                                                                    << trim(s.text) << "\n";
@@ -317,6 +322,7 @@ void Harness::maybe_compact(const GenResult& r) {
     msgs_.push_back({"user", "[harness] Summary of the earlier conversation, written by you:\n" + trim(s.text) +
                                  "\n\n" + ledger(), "", {}});
     save_transcript();
+    return true;
 }
 
 Action Harness::slash(const std::string& line) {

@@ -26,7 +26,7 @@ if [[ -n ${NODE:-} ]]; then
   # internet: restrict=on, plus one forwarded port for the model API.
   # NET_OPEN=1 lifts this (and exposes everything on the host's 127.0.0.1).
   if [[ -z ${NET_OPEN:-} ]]; then
-    uplink="user,id=n0,restrict=on,guestfwd=tcp:10.0.2.100:8090-tcp:127.0.0.1:${API_PORT:-8090}"
+    uplink="user,id=n0,restrict=on,guestfwd=tcp:10.0.2.100:8090-cmd:nc 127.0.0.1 ${API_PORT:-8090}"  # cmd: runs one relay per connection; tcp: would connect once
     append=${append//api_url=http:\/\/10.0.2.2:8090/api_url=http:\/\/10.0.2.100:8090}
   fi
   append+=" potemkin.hostname=node$NODE potemkin.net2=10.10.0.1$NODE/24"

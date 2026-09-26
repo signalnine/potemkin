@@ -71,7 +71,7 @@ private:
     void run_call(const ToolCallRec& c);
     void save_transcript();
     bool load_transcript();
-    void maybe_compact(const GenResult& r);
+    bool maybe_compact(const GenResult& r);  // true if the history was replaced
     Action slash(const std::string& line);
     std::string ledger() const;
 

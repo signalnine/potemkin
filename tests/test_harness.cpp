@@ -288,6 +288,18 @@ TEST(transcript_saved_every_round) { Env e; Host h(e.hc); FakeBackend b; Capture
     H.handle_line("go");
     HAS(mid, "wrote 1 bytes"); HAS(mid, "\"go\""); }
 
+TEST(compaction_mid_turn_between_rounds) { Env e; Host h(e.hc); FakeBackend b; CaptureConsole c; Harness H(b, h, c, e.cfg);
+    GenResult r1 = calls({call("write", {{"path", "/data/a"}, {"content", "1"}})}); r1.prompt_tokens = 900;  // limit 1000
+    b.script = {r1, text("SUMMARY: wrote /data/a, next write /data/b"),
+                calls({call("write", {{"path", "/data/b"}, {"content", "2"}})}), text("done")};
+    H.handle_line("write a then b");
+    CHECK(b.seen.size() == 4);
+    auto& after = b.seen[2];  // first request after compaction, same turn
+    CHECK(after[0].content == "SYS");
+    HAS(after[1].content, "SUMMARY: wrote /data/a");
+    HAS(after.back().content, "Continue where you left off");
+    CHECK(fs::exists(e.root / "data/b")); HAS(c.all, "done"); }
+
 // ---- frozen blocks ----
 TEST(tools_json_has_eight_in_order) {
     std::string t = kToolsJson; size_t pos = 0; std::vector<std::string> names;
