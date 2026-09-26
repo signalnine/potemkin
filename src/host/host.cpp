@@ -345,6 +345,10 @@ std::string Host::real(const std::string& p) const {
         size_t n = std::strlen(k);
         if (p.compare(0, n, k) == 0 && (p.size() == n || p[n] == '/')) return p;
     }
+    for (auto& [from, to] : cfg_.mounts) {
+        if (p.compare(0, from.size(), from) == 0 && (p.size() == from.size() || p[from.size()] == '/'))
+            return to + p.substr(from.size());
+    }
     return cfg_.root + p;
 }
 

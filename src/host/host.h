@@ -25,6 +25,8 @@ struct Config {
     std::string model_name = "unknown";
     bool netboot = false;
     bool isolate = false;
+    // Model path prefix -> host path (dev: /usr/lib/potemkin -> build/sysroot).
+    std::vector<std::pair<std::string, std::string>> mounts;
     // netboot: url -> body; set err on failure. Kept out of the host library
     // so it needs no HTTP or TLS code.
     std::function<std::string(const std::string& url, std::string& err)> fetcher;              // dev: children chroot into root via user+mount namespaces

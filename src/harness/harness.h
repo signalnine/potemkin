@@ -73,6 +73,7 @@ private:
     bool load_transcript();
     void maybe_compact(const GenResult& r);
     Action slash(const std::string& line);
+    std::string ledger() const;
 
     Backend& be_;
     Host& host_;

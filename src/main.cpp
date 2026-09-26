@@ -163,6 +163,7 @@ int main(int argc, char** argv) {
         hc.fetcher = [ca](const std::string& url, std::string& err) { return pk::http_fetch(url, err, ca); };
     }
     hc.isolate = !root.empty();  // dev: programs see the village as /, like the image
+    if (!root.empty() && sysroot != "/usr/lib/potemkin") hc.mounts = {{"/usr/lib/potemkin", sysroot}};
 
     con.say("loading " + hc.model_name + " ...");
     std::unique_ptr<pk::Backend> be;

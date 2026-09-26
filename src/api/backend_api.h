@@ -13,6 +13,7 @@ struct ApiOpts {
     std::string key;                                // Bearer token; may be empty for local servers
     std::string model = "gpt-4.1";
     int context = 128000;
+    int max_tokens = 32768;  // per reply; servers default lower (q27-server: 8192)
     int timeout_s = 600;
     std::string ca_file = "/etc/ssl/certs/ca-certificates.crt";
 };

@@ -34,7 +34,7 @@ const char* kToolsJson = R"JSON([
 {"type": "function", "function": {"name": "stat", "description": "Type, size, mode and mtime of a path. With list=1, the entries of a directory instead.", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Absolute path"}, "list": {"type": "integer", "description": "1 to list a directory"}}, "required": ["path"]}}},
 {"type": "function", "function": {"name": "spawn", "description": "Run a program as root. There is no shell: exe is an absolute path to a binary and argv is one string split on spaces (quotes group words). mode capture (default) waits and returns the exit code and output; background returns the pid at once and logs to /state/log/<pid>; tty gives the console to the program until it exits. Each program gets its own cgroup capped at mem_mb.", "parameters": {"type": "object", "properties": {"exe": {"type": "string", "description": "Absolute path of the binary"}, "argv": {"type": "string", "description": "Arguments as one string"}, "mode": {"type": "string", "description": "capture, background or tty"}, "timeout_s": {"type": "integer", "description": "capture: kill after this many seconds, default 60"}, "mem_mb": {"type": "integer", "description": "Memory cap, default 512"}, "stdin": {"type": "string", "description": "capture: text fed to stdin"}}, "required": ["exe"]}}},
 {"type": "function", "function": {"name": "wait", "description": "Wait for a background process, then return its exit status and the tail of its log. If signal is given (TERM, KILL, INT, HUP or a number) it is sent first.", "parameters": {"type": "object", "properties": {"pid": {"type": "integer", "description": "Process id from spawn"}, "signal": {"type": "string", "description": "Signal to send first"}, "timeout_s": {"type": "integer", "description": "Give up waiting after this long, default 60"}}, "required": ["pid"]}}},
-{"type": "function", "function": {"name": "compile", "description": "Compile one C source file with tcc against musl into a static binary at /generated/bin/<name>. The binary and its source are kept in /store under their content hash. Compiler errors come back as the result; fix and compile again.", "parameters": {"type": "object", "properties": {"lang": {"type": "string", "description": "Only c"}, "name": {"type": "string", "description": "Binary name, no slashes"}, "source": {"type": "string", "description": "The complete C source"}, "opts": {"type": "string", "description": "Extra compiler flags"}}, "required": ["lang", "name", "source"]}}},
+{"type": "function", "function": {"name": "compile", "description": "Compile one C source file with tcc against musl into a static binary at /generated/bin/<name>. The binary and its source are kept in /store under their content hash. Compiler errors come back as the result; fix and compile again. musl's headers are in /usr/lib/potemkin/usr/include/x86_64-linux-musl.", "parameters": {"type": "object", "properties": {"lang": {"type": "string", "description": "Only c"}, "name": {"type": "string", "description": "Binary name, no slashes"}, "source": {"type": "string", "description": "The complete C source"}, "opts": {"type": "string", "description": "Extra compiler flags"}}, "required": ["lang", "name", "source"]}}},
 {"type": "function", "function": {"name": "snapshot", "description": "Checkpoint /generated and /state and return its id. With rollback=<id>, restore that checkpoint and kill every process started after it. A checkpoint is taken automatically before each turn that changes files or runs programs.", "parameters": {"type": "object", "properties": {"rollback": {"type": "integer", "description": "Checkpoint id to restore"}}, "required": []}}},
 {"type": "function", "function": {"name": "fetch", "description": "Fetch a URL and return the body. Netboot mode only.", "parameters": {"type": "object", "properties": {"url": {"type": "string", "description": "http or https URL"}}, "required": ["url"]}}}
 ])JSON";
@@ -90,6 +90,22 @@ const char* kCompactPrompt =
     "and anything you promised to do. Plain text, under 300 words. Do not call tools.";
 
 }  // namespace
+
+// What /generated/bin actually holds, for the model to check its memory against.
+std::string Harness::ledger() const {
+    std::vector<std::string> lines;
+    std::error_code ec;
+    for (auto& e : fs::directory_iterator(host_.real("/generated/bin"), ec)) {
+        std::string n = e.path().filename().string();
+        if (e.is_symlink(ec)) n += " -> " + fs::read_symlink(e.path(), ec).string();
+        lines.push_back("  " + n);
+    }
+    std::sort(lines.begin(), lines.end());
+    std::string out = "[harness] /generated/bin right now:";
+    if (lines.empty()) out += " (empty)";
+    for (auto& l : lines) out += "\n" + l;
+    return out;
+}
 
 // ---------------------------------------------------------------- transcript
 
@@ -170,6 +186,7 @@ bool Harness::load_transcript() {
 void Harness::boot() {
     int boots = std::atoi(slurp(host_.real("/state/boots")).c_str()) + 1;
     std::ofstream(host_.real("/state/boots"), std::ios::trunc) << boots << "\n";
+    ::sync();
     con_.say("[ potemkin/" + std::to_string(boots) + " ]\n");
     if (msgs_.size() <= 1) {
         con_.say("hello. there is nothing here yet.");
@@ -257,6 +274,7 @@ void Harness::user_turn(const std::string& content, const std::string& intent) {
     }
     save_transcript();
     maybe_compact(last);
+    ::sync();  // the VM can be killed and the power can go out; undo has to survive both
 }
 
 void Harness::maybe_compact(const GenResult& r) {
@@ -285,8 +303,10 @@ void Harness::maybe_compact(const GenResult& r) {
     std::ofstream(host_.real("/state/summaries"), std::ios::app) << "--- " << now_iso() << " turn=" << turn_ << "\n"
                                                                    << trim(s.text) << "\n";
     // The system message stays byte-identical so the prefix-cache cut holds.
+    // A summary is the model's account of itself; the ledger is what exists.
     msgs_.resize(1);
-    msgs_.push_back({"user", "[harness] Summary of the earlier conversation, written by you:\n" + trim(s.text), "", {}});
+    msgs_.push_back({"user", "[harness] Summary of the earlier conversation, written by you:\n" + trim(s.text) +
+                                 "\n\n" + ledger(), "", {}});
     save_transcript();
 }
 

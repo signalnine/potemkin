@@ -17,7 +17,7 @@ struct Q27Opts {
     float temp = 1.0f, top_p = 0.95f, min_p = 0.05f;
     int top_k = 20;
     bool think = true;
-    int n_max = 16384;            // per assistant round
+    int n_max = 65536;            // per assistant round, clamped to the window; a shell takes >16K of planning
     bool verbose = false;         // q27's own stderr chatter
 };
 

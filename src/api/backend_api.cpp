@@ -41,6 +41,7 @@ public:
         GenResult res;
         ojson body;
         body["model"] = o_.model;
+        body["max_tokens"] = o_.max_tokens;
         body["stream"] = true;
         body["stream_options"] = {{"include_usage", true}};
         body["tools"] = tools_;

@@ -77,7 +77,7 @@ TEST(request_shape) { Fake f; f.streams = {{delta({{"content", "ok"}}, "stop")}}
     auto b = make_api_backend(f.opts()); Sink s; std::atomic<bool> no{false};
     b->generate(convo(), s, no);
     CHECK(f.bodies.size() == 1); auto& j = f.bodies[0];
-    CHECK(j["model"] == "m1"); CHECK(j["stream"] == true);
+    CHECK(j["model"] == "m1"); CHECK(j["stream"] == true); CHECK(j["max_tokens"] == 32768);
     CHECK(j["messages"][0]["role"] == "system"); CHECK(j["messages"][0]["content"] == "SYS");
     CHECK(j["messages"][1]["role"] == "user"); CHECK(j["messages"][1]["content"] == "hi");
     CHECK(j["tools"].size() == 8); CHECK(j["tools"][5]["function"]["name"] == "compile");

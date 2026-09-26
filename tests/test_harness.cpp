@@ -246,6 +246,18 @@ TEST(reply_cut_off_is_visible) { Env e; Host h(e.hc); FakeBackend b; CaptureCons
     b.script = {r};
     H.handle_line("go"); HAS(c.all, "cut off"); }
 
+TEST(compaction_appends_ledger_ground_truth) { Env e; Host h(e.hc); FakeBackend b; CaptureConsole c; Harness H(b, h, c, e.cfg);
+    fs::create_directories(e.root / "store/sha256:aaa");
+    fs::create_symlink("/store/sha256:aaa/bin", e.root / "generated/bin/ls");
+    GenResult big = text("x"); big.prompt_tokens = 900;
+    b.script = {big, text("SUMMARY: I built ls and sh (sha256:bbb)"), text("ok")};
+    H.handle_line("hi");
+    H.handle_line("next");
+    auto& m = b.seen.back();
+    HAS(m[1].content, "SUMMARY: I built ls and sh");
+    HAS(m[1].content, "ls -> /store/sha256:aaa/bin");
+    HAS(m[1].content, "[harness] /generated/bin right now"); }
+
 // ---- frozen blocks ----
 TEST(tools_json_has_eight_in_order) {
     std::string t = kToolsJson; size_t pos = 0; std::vector<std::string> names;

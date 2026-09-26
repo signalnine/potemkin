@@ -93,6 +93,10 @@ TEST(proc_sys_dev_pass_through_root) { Env e; Host h(e.cfg);
     HAS(h.call("stat", {{"path", "/sys"}, {"list", "1"}}).body, "class/");
     HAS(h.call("stat", {{"path", "/dev/null"}}).body, "chardev");
     CHECK(h.real("/procfoo") == e.root.string() + "/procfoo"); }
+TEST(mounts_map_model_paths) { Env e; fs::path sys = e.root / "hostside"; spit(sys / "inc/time.h", "struct tm;");
+    e.cfg.mounts = {{"/usr/lib/potemkin", sys.string()}}; Host h(e.cfg);
+    CHECK(h.call("read", {{"path", "/usr/lib/potemkin/inc/time.h"}}).body == "struct tm;");
+    CHECK(h.real("/usr/lib/potemkinx") == e.root.string() + "/usr/lib/potemkinx"); }
 TEST(read_proc) { Config c; c.root = ""; Host h(c);
     auto r = h.call("read", {{"path", "/proc/self/status"}}); HAS(r.body, "Name:"); }
 
