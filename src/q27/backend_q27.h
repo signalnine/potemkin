@@ -10,7 +10,9 @@ namespace pk {
 struct Q27Opts {
     std::string model, tok;
     int ctx = -1;                 // -1: size from free VRAM
-    double fixed_stack_gb = 0.6;  // non-KV engine stack (12g build + slim pack measure ~0.54)
+    double fixed_stack_gb = -1;   // non-KV engine stack; <0: the server's per-arch calibration
+                                  // (the 12g build + slim pack measure ~0.54: pass 0.6)
+    std::string dflash2;          // DFlash2 serving pack (.d2w), empty = MTP only
     std::string prefix_cache;     // dir, empty = off
     float temp = 1.0f, top_p = 0.95f, min_p = 0.05f;
     int top_k = 20;

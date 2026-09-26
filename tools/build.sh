@@ -20,9 +20,20 @@ if [[ $what == test || $what == all ]]; then
 fi
 
 if [[ $what == init || $what == all ]]; then
-  # The 12g engine shape (W_MAX=8, 256-row prefill); pair with slim packs.
-  $NVCC -O2 -std=c++17 -gencode arch=compute_$ARCH,code=sm_$ARCH -Xcompiler -Wall \
-    -DQ27_W_MAX=8 -DQ27_PF_T=256 -Xcompiler -pthread -I"$Q27/src" -I"$Q27/third_party" \
+  # PROFILE=12g: the 3060 engine shape (sm_86 only, W_MAX=8, 256-row prefill;
+  # pair with slim packs). PROFILE=full: q27's default tri-arch shape
+  # (sm_86/89/120, W_MAX=12, 1024-row prefill) for 24 GB+ cards.
+  PROFILE=${PROFILE:-12g}
+  if [[ $PROFILE == full ]]; then
+    GEN="-gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 -gencode arch=compute_120,code=sm_120"
+    SHAPE=""
+    ARCH=full
+  else
+    GEN="-gencode arch=compute_$ARCH,code=sm_$ARCH"
+    SHAPE="-DQ27_W_MAX=8 -DQ27_PF_T=256"
+  fi
+  $NVCC -O2 -std=c++17 $GEN -Xcompiler -Wall \
+    $SHAPE -Xcompiler -pthread -I"$Q27/src" -I"$Q27/third_party" \
     -DPK_TLS src/main.cpp src/q27/backend_q27.cu src/api/backend_api.cpp src/harness/harness.cpp src/host/host.cpp \
     "$Q27"/src/{dflash2,blocks,prefill,kernels,spec3,vgemm,device_model}.cu \
     "$Q27/src/loader.cpp" "$Q27/src/tokenizer.cpp" "$Q27/build/pf4.o" \

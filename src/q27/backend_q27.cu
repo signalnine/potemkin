@@ -50,6 +50,14 @@ public:
         setenv("Q27_SUFFIX", "1", 0);
         setenv("Q27_PF_BATCH_MIN", "2", 0);
         setenv("Q27_SUFFIX_W", std::to_string(W_MAX).c_str(), 0);
+        // DFlash2 is single-slot and sets itself up inside build_spec_graphs.
+        double d2_reserve = 0;
+        if (!o.dflash2.empty()) {
+            setenv("Q27_DFLASH2", o.dflash2.c_str(), 1);
+            setenv("Q27_BATCH", "0", 1);
+            setenv("Q27_DFLASH2_RESERVE_GB", "3", 0);
+            d2_reserve = atof(getenv("Q27_DFLASH2_RESERVE_GB")) * 1e9;
+        }
 
         tok_ = std::make_unique<q27::Tokenizer>(o.tok);
         model_ = std::make_unique<q27::Model>(q27::Model::open(o.model));
@@ -66,7 +74,22 @@ public:
             double pair = !kv ? 4096 : !strcmp(kv, "fp8") ? 2048 : !strcmp(kv, "turbo5k") ? 1056
                         : !strcmp(kv, "turbo3") ? 800 : !strcmp(kv, "int8g64") ? 1456 : 4096;
             double per_tok = 17.0 * pair;
-            long budget = (long)((double)free_b - o.fixed_stack_gb * 1e9 - 0.15e9);
+            // Non-KV stack: measured value if given, else server.cu:661-722's
+            // per-arch calibration (graphs + GDN state + base, no constrained set).
+            double fixed, slack;
+            double measured = o.fixed_stack_gb > 0 ? o.fixed_stack_gb : Q27_PF_T == 256 ? 0.6 : -1;
+            if (measured > 0) {  // the 12g shape (PF_T=256) measures ~0.54 GB
+                fixed = measured * 1e9;
+                slack = 0.15e9;
+            } else {
+                double graphs = cc >= 89 ? 0.13e9 : 0.43e9;
+                double gdn = 2 * 0.157e9 + (Q27_W_MAX - 1) * 3.95e6;
+                double base = cc >= 120 ? 0.89e9 : cc >= 89 ? 2.13e9 : 1.77e9;
+                double mono_save = cc >= 89 ? 0.01e9 : 0.015e9;
+                fixed = base + graphs + gdn - mono_save;
+                slack = cc >= 120 ? 0.25e9 : 1.0e9;
+            }
+            long budget = (long)((double)free_b - fixed - slack - d2_reserve);
             long c = budget > 0 ? (long)(budget / per_tok) : 0;
             long cap = (kv && strcmp(kv, "fp16")) ? 262144 : 131072;
             ctx = (int)(std::min(c, cap) / 4096 * 4096);

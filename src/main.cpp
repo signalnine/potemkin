@@ -85,7 +85,7 @@ void usage() {
     std::fprintf(stderr,
                  "usage: q27-init --model M.q27 --tok T.tok [--tty /dev/tty1|-] [--root DIR]\n"
                  "                [--sysroot DIR] [--cgroup /sys/fs/cgroup] [--ctx N] [--fixed-stack-gb G]\n"
-                 "                [--prefix-cache DIR] [--no-think] [--engine-log FILE]\n"
+                 "                [--prefix-cache DIR] [--no-think] [--engine-log FILE] [--dflash2 PACK.d2w]\n"
                  "                [--llm cuda|api] [--api-url URL] [--api-model NAME]  (key: PK_API_KEY)\n"
                  "kernel cmdline supplies llm= model= api_url= api_key= api_model=.\n");
 }
@@ -114,6 +114,7 @@ int main(int argc, char** argv) {
         else if (a == "--ctx") qo.ctx = std::atoi(next().c_str());
         else if (a == "--fixed-stack-gb") qo.fixed_stack_gb = std::atof(next().c_str());
         else if (a == "--prefix-cache") qo.prefix_cache = next();
+        else if (a == "--dflash2") qo.dflash2 = next();
         else if (a == "--no-think") qo.think = false;
         else if (a == "--llm") llm = next();
         else if (a == "--engine-log") engine_log = next();
@@ -127,6 +128,8 @@ int main(int argc, char** argv) {
         std::string which = kc.count("model") ? kc["model"] : "bonsai";
         if (qo.model.empty()) qo.model = "/models/" + which + ".q27";
         if (qo.tok.empty()) qo.tok = "/models/qwen38.tok";
+        std::string d2 = "/models/" + which + "-dflash2.d2w";
+        if (qo.dflash2.empty() && ::access(d2.c_str(), R_OK) == 0) qo.dflash2 = d2;
     }
 
     // q27 narrates to stderr; that belongs in a log, not on the console.
