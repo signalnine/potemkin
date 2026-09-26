@@ -150,6 +150,13 @@ TEST(reasoning_sent_back_only_when_present) { Fake f; f.streams = {{delta({{"con
     auto& ms = f.bodies[0]["messages"];
     CHECK(ms[2]["reasoning_content"] == "thought"); CHECK(!ms[3].contains("reasoning_content")); }
 
+TEST(invalid_utf8_in_history_does_not_throw) { Fake f; f.streams = {{delta({{"content", "k"}}, "stop")}};
+    auto b = make_api_backend(f.opts()); Sink s; std::atomic<bool> no{false};
+    auto m = convo(); m.push_back({"assistant", "a", "", {}}); m.push_back({"tool", std::string("bad \xff\xfe bytes"), "", {}});
+    GenResult r;
+    try { r = b->generate(m, s, no); } catch (...) { CHECK(!"threw"); }
+    CHECK(r.end == "eos"); CHECK(f.bodies.size() == 1); }
+
 int main(int argc, char** argv) {
     for (auto& [n, fn] : registry()) {
         if (argc > 1 && n.find(argv[1]) == std::string::npos) continue;

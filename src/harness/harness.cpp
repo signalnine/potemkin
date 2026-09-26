@@ -260,8 +260,9 @@ void Harness::user_turn(const std::string& content, const std::string& intent) {
         }
         if (r.end == "error") {
             con_.say("[backend error] " + r.text);
-            msgs_.pop_back();  // the user turn never happened
-            --turn_;
+            // Nothing happened yet: the turn never happened. After tool rounds
+            // the calls and their results stay, pairs intact.
+            if (msgs_.back().role == "user") { msgs_.pop_back(); --turn_; }
             break;
         }
         msgs_.push_back({"assistant", r.text, r.reasoning, r.calls});

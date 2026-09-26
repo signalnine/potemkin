@@ -258,6 +258,20 @@ TEST(compaction_appends_ledger_ground_truth) { Env e; Host h(e.hc); FakeBackend 
     HAS(m[1].content, "ls -> /store/sha256:aaa/bin");
     HAS(m[1].content, "[harness] /generated/bin right now"); }
 
+TEST(backend_error_mid_turn_keeps_pairs) { Env e; Host h(e.hc); FakeBackend b; CaptureConsole c; Harness H(b, h, c, e.cfg);
+    GenResult boom; boom.end = "error"; boom.text = "api: connection reset";
+    b.script = {calls({call("write", {{"path", "/data/a"}, {"content", "1"}}), call("read", {{"path", "/data/a"}})}), boom};
+    H.handle_line("go");
+    auto& m = H.messages();
+    CHECK(m.size() == 5);  // system, user, assistant(2 calls), tool, tool
+    CHECK(m[2].calls.size() == 2); CHECK(m[3].role == "tool"); CHECK(m[4].role == "tool");
+    HAS(c.all, "connection reset"); }
+TEST(backend_error_first_round_drops_turn) { Env e; Host h(e.hc); FakeBackend b; CaptureConsole c; Harness H(b, h, c, e.cfg);
+    GenResult boom; boom.end = "error"; boom.text = "api: down";
+    b.script = {boom};
+    H.handle_line("go");
+    CHECK(H.messages().size() == 1); }
+
 // ---- frozen blocks ----
 TEST(tools_json_has_eight_in_order) {
     std::string t = kToolsJson; size_t pos = 0; std::vector<std::string> names;

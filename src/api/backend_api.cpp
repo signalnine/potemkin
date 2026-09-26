@@ -111,7 +111,9 @@ public:
             }
             return !cancel.load();
         };
-        auto r = cli.Post(prefix_ + "/chat/completions", hdr, body.dump(), "application/json", receiver);
+        // replace: a stray invalid byte in history must not take the process down.
+        std::string payload = body.dump(-1, ' ', false, ojson::error_handler_t::replace);
+        auto r = cli.Post(prefix_ + "/chat/completions", hdr, payload, "application/json", receiver);
 
         if (cancel.load()) { res.end = "cancelled"; return res; }
         if (!r) {

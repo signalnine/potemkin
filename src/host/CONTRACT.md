@@ -78,3 +78,12 @@ Verified by `build/test_host` (`tests/test_host.cpp`).
 ## fetch(url)
 - [x] Present in the tool list only when `Config::netboot`; otherwise `error: fetch: not available offline` -> test `fetch_offline`
 (Real HTTP lands in pk-5vq.3.4.)
+
+## Hardening (code review, 2026-09-26)
+- [x] read never slurps: seeks regular files, streams others non-blocking, one page max -> tests `read_endless_device_is_bounded`, `read_offset_does_not_slurp`
+- [x] every result is valid UTF-8; cuts land on character boundaries -> tests `read_cut_keeps_utf8_whole`, `spawn_binary_output_is_valid_utf8`
+- [x] capture keeps a rolling tail and returns when the child exits (daemons may keep the pipe) -> tests `spawn_capture_keeps_real_tail`, `spawn_capture_returns_when_child_exits`
+- [x] compile opts keep their order -> test `compile_opts_in_order`
+- [x] snapshots skip FIFOs/sockets/devices; ids continue across restarts -> tests `snapshot_skips_special_files`, `snapshot_ids_continue_across_restarts`
+- [x] KILL, escape chord, timeouts and rollback use cgroup.kill; exited children's cgroups are removed -> tests `kill_uses_cgroup_kill`, `cgroup_removed_after_exit`, `spawn_cgroup_files`
+- [x] tty proxy stops polling a hung-up pty -> test `tty_child_closing_terminal_does_not_spin`

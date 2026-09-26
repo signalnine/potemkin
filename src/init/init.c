@@ -416,10 +416,19 @@ int main(int argc, char** argv) {
     const char* me = strrchr(argv[0], '/');
     if (!strcmp(me ? me + 1 : argv[0], "rescue")) { rescue(tty); return 0; }
 
-    signal(SIGINT, SIG_IGN);  // Ctrl-Alt-Del and friends are not a way down
+    // Ctrl-Alt-Del would hard-reset without syncing; with CAD off the kernel
+    // sends PID 1 a SIGINT instead, which is ignored. /reboot is the way down.
+    reboot(RB_DISABLE_CAD);
+    signal(SIGINT, SIG_IGN);
     pid_t model = start_model(tty);
     time_t last_start = time(NULL);
     for (;;) {
+        if (model < 0) {  // fork failed: keep trying rather than give up on the model
+            sleep(5);
+            model = start_model(tty);
+            last_start = time(NULL);
+            continue;
+        }
         int st;
         pid_t p = wait(&st);
         if (p < 0) { if (errno == ECHILD) sleep(1); continue; }

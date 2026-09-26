@@ -51,20 +51,63 @@ void need_abs(const std::string& p) {
     if (p.empty() || p[0] != '/') throw ArgError{"path must be absolute: " + p};
 }
 
+// Length of the UTF-8 sequence at s[i] (strict: no overlongs, surrogates or
+// code points past U+10FFFF); 0 if invalid, -1 if it runs off the end.
+int utf8_seq(const std::string& s, size_t i) {
+    auto b = [&](size_t k) { return static_cast<unsigned char>(s[k]); };
+    unsigned char c = b(i);
+    if (c < 0x80) return 1;
+    int n = (c >= 0xC2 && c <= 0xDF) ? 2 : (c >= 0xE0 && c <= 0xEF) ? 3 : (c >= 0xF0 && c <= 0xF4) ? 4 : 0;
+    if (!n) return 0;
+    unsigned char lo = 0x80, hi = 0xBF;  // allowed range of the second byte
+    if (c == 0xE0) lo = 0xA0;
+    else if (c == 0xED) hi = 0x9F;
+    else if (c == 0xF0) lo = 0x90;
+    else if (c == 0xF4) hi = 0x8F;
+    for (int k = 1; k < n; ++k) {
+        if (i + k >= s.size()) return -1;
+        unsigned char x = b(i + k);
+        if (k == 1 ? (x < lo || x > hi) : (x & 0xC0) != 0x80) return 0;
+    }
+    return n;
+}
+
+// Text (no NULs, valid UTF-8). A sequence cut off by a page boundary still
+// counts as text; utf8_whole() drops it before the page is shown.
 bool valid_utf8(const std::string& s) {
-    size_t i = 0, n = s.size();
-    while (i < n) {
-        unsigned char c = s[i];
-        int len = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 0;
-        if (!len) return false;
-        if (c == 0) return false;
-        // A multi-byte sequence cut at the end of a page is still text.
-        if (i + len > n) return true;
-        for (int k = 1; k < len; ++k)
-            if ((static_cast<unsigned char>(s[i + k]) >> 6) != 2) return false;
-        i += len;
+    for (size_t i = 0; i < s.size();) {
+        if (s[i] == 0) return false;
+        int n = utf8_seq(s, i);
+        if (n < 0) return s.size() - i < 4;
+        if (n == 0) return false;
+        i += n;
     }
     return true;
+}
+
+// s without a trailing partial sequence.
+std::string utf8_whole(std::string s) {
+    size_t i = 0;
+    while (i < s.size()) {
+        int n = utf8_seq(s, i);
+        if (n <= 0) break;
+        i += n;
+    }
+    if (i < s.size() && utf8_seq(s, i) < 0) s.resize(i);
+    return s;
+}
+
+// Every tool result must be valid UTF-8 (the API backend's JSON and the
+// tokenizer both depend on it); invalid bytes become U+FFFD.
+std::string sanitize_utf8(const std::string& s) {
+    std::string o;
+    o.reserve(s.size());
+    for (size_t i = 0; i < s.size();) {
+        int n = utf8_seq(s, i);
+        if (n > 0) { o.append(s, i, n); i += n; }
+        else { o += "\xEF\xBF\xBD"; ++i; }
+    }
+    return o;
 }
 
 std::string hexdump(const std::string& s, size_t base) {
@@ -89,15 +132,32 @@ std::string hexdump(const std::string& s, size_t base) {
     return out;
 }
 
-bool read_all(const std::string& path, std::string& out) {
-    int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+// Read at most `limit` bytes starting at `off`, never the whole file: seek
+// regular files, stream everything else (/proc, pipes, devices). Non-blocking,
+// so a device with nothing to say returns what it has instead of hanging.
+// total is the file size when the kernel knows it, else -1.
+bool read_range(const std::string& path, size_t off, size_t limit, std::string& out, long long& total) {
+    int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
     if (fd < 0) return false;
+    struct stat st;
+    total = -1;
+    bool sized = ::fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
+    if (sized) total = st.st_size;
     char buf[65536];
-    ssize_t r;
-    while ((r = ::read(fd, buf, sizeof buf)) > 0) out.append(buf, r);
+    size_t skip = off;
+    if (sized && ::lseek(fd, (off_t)off, SEEK_SET) == (off_t)off) skip = 0;
+    while (out.size() < limit) {
+        size_t want = skip ? std::min(skip, sizeof buf) : std::min(limit - out.size(), sizeof buf);
+        ssize_t r = ::read(fd, buf, want);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;  // EOF, EAGAIN, or an error: keep what we have
+        if (skip) { skip -= (size_t)r; continue; }
+        out.append(buf, r);
+    }
     ::close(fd);
-    return r == 0;
+    return true;
 }
+
 
 bool write_file(const std::string& path, const std::string& data) {
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
@@ -133,20 +193,36 @@ std::string status_str(int st) {
     return "status=" + std::to_string(st);
 }
 
-// Tail of a string, cut at a line boundary when possible.
-std::string tail(const std::string& s, size_t n) {
-    if (s.size() <= n) return s;
-    size_t start = s.size() - n;
+// Tail of a string, cut at a line boundary when possible. `dropped` counts
+// bytes already discarded before s began.
+std::string tail(const std::string& s, size_t n, size_t dropped = 0) {
+    if (s.size() <= n && !dropped) return s;
+    size_t start = s.size() > n ? s.size() - n : 0;
     size_t nl = s.find('\n', start);
-    if (nl != std::string::npos && nl + 1 < s.size()) start = nl + 1;
-    return "[... " + std::to_string(start) + " bytes omitted]\n" + s.substr(start);
+    if (start && nl != std::string::npos && nl + 1 < s.size()) start = nl + 1;
+    return "[... " + std::to_string(start + dropped) + " bytes omitted]\n" + s.substr(start);
 }
 
+// Files, directories and symlinks; FIFOs, sockets and device nodes are left
+// out (fs::copy refuses them, and one would break every later snapshot).
 void copy_tree(const fs::path& from, const fs::path& to) {
     fs::create_directories(to);
-    if (!fs::exists(from)) return;
-    fs::copy(from, to, fs::copy_options::recursive | fs::copy_options::copy_symlinks |
-                           fs::copy_options::overwrite_existing);
+    std::error_code ec;
+    if (!fs::exists(from, ec)) return;
+    for (auto it = fs::recursive_directory_iterator(from, fs::directory_options::skip_permission_denied, ec);
+         it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (ec) break;
+        fs::path dst = to / fs::relative(it->path(), from, ec);
+        fs::file_status st = it->symlink_status(ec);
+        if (fs::is_symlink(st)) {
+            fs::remove(dst, ec);
+            fs::copy_symlink(it->path(), dst, ec);
+        } else if (fs::is_directory(st)) {
+            fs::create_directories(dst, ec);
+        } else if (fs::is_regular_file(st)) {
+            fs::copy_file(it->path(), dst, fs::copy_options::overwrite_existing, ec);
+        }
+    }
 }
 
 // Drop CSI/OSC escape sequences and carriage returns so the model reads the
@@ -196,13 +272,13 @@ struct TtyResult { int status = 0; bool escaped = false, timed_out = false; std:
 
 // Shuttle bytes console <-> child pty until the child exits. Two Ctrl-] in a
 // row kill the child's session; a lone Ctrl-] is passed through.
-TtyResult proxy_tty(int conf, int ptm, pid_t pid, long long timeout_s) {
+TtyResult proxy_tty(int conf, int ptm, pid_t pid, long long timeout_s, const std::function<void()>& kill_child) {
     TtyResult r;
     struct termios saved, raw;
     bool have = ::tcgetattr(conf, &saved) == 0;
     if (have) { raw = saved; ::cfmakeraw(&raw); ::tcsetattr(conf, TCSANOW, &raw); }
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
-    bool held = false, exited = false;
+    bool held = false, exited = false, hup = false;
     int st = 0;
     const size_t keep = 8192;
     auto push = [&](const char* b, size_t n) {
@@ -212,10 +288,11 @@ TtyResult proxy_tty(int conf, int ptm, pid_t pid, long long timeout_s) {
     for (;;) {
         if (!exited && ::waitpid(pid, &st, WNOHANG) == pid) exited = true;
         if (timeout_s > 0 && !exited && std::chrono::steady_clock::now() >= deadline) {
-            ::kill(-pid, SIGKILL);
+            kill_child();
             r.timed_out = true;
         }
-        struct pollfd fds[2] = {{conf, POLLIN, 0}, {ptm, POLLIN, 0}};
+        // After a hangup the master polls ready forever; stop watching it.
+        struct pollfd fds[2] = {{conf, POLLIN, 0}, {hup ? -1 : ptm, POLLIN, 0}};
         int n = ::poll(fds, 2, exited ? 50 : 100);
         if (n < 0 && errno != EINTR) break;
         bool got_out = false;
@@ -226,6 +303,7 @@ TtyResult proxy_tty(int conf, int ptm, pid_t pid, long long timeout_s) {
             else if (exited) break;
         } else if (fds[1].revents & (POLLHUP | POLLERR)) {
             if (exited) break;
+            hup = true;
         }
         if (exited && !got_out) break;  // drained
         if (!exited && (fds[0].revents & POLLIN)) {
@@ -241,7 +319,7 @@ TtyResult proxy_tty(int conf, int ptm, pid_t pid, long long timeout_s) {
                 if (held) { fwd += char(0x1d); held = false; }
                 fwd += buf[i];
             }
-            if (r.escaped) { ::kill(-pid, SIGKILL); continue; }
+            if (r.escaped) { kill_child(); continue; }
             if (!fwd.empty()) (void)!::write(ptm, fwd.data(), fwd.size());
         }
     }
@@ -327,15 +405,43 @@ std::vector<std::string> split_argv(const std::string& s) {
 // ---------------------------------------------------------------- Host
 
 Host::Host(Config c) : cfg_(std::move(c)) {
-    if (cfg_.isolate && !cfg_.root.empty()) {
-        std::error_code ec;
+    std::error_code ec;
+    if (cfg_.isolate && !cfg_.root.empty())
         for (const char* k : {"/proc", "/sys", "/dev"}) fs::create_directories(cfg_.root + k, ec);
+    // Snapshot ids continue across restarts: rescue and /undo pick by id.
+    for (auto& e : fs::directory_iterator(real(cfg_.snapshot_dir), ec)) {
+        const std::string n = e.path().filename().string();
+        if (!n.empty() && n.find_first_not_of("0123456789") == std::string::npos)
+            snapshots_ = std::max(snapshots_, std::atoi(n.c_str()));
     }
 }
 
 Host::~Host() {
     for (auto& [pid, p] : procs_)
-        if (p.state == "running") { ::kill(-pid, SIGKILL); ::waitpid(pid, nullptr, 0); }
+        if (p.state == "running") { kill_tree(pid); ::waitpid(pid, nullptr, 0); cg_release(pid); }
+}
+
+void Host::kill_tree(pid_t pid) {
+    if (!cfg_.cgroup_root.empty()) {
+        fs::path k = fs::path(cfg_.cgroup_root) / "potemkin" / std::to_string(pid) / "cgroup.kill";
+        write_file(k, "1");  // catches jobs that left the process group, too
+    }
+    ::kill(-pid, SIGKILL);
+}
+
+void Host::cg_release(pid_t pid) {
+    if (cfg_.cgroup_root.empty()) return;
+    fs::path cg = fs::path(cfg_.cgroup_root) / "potemkin" / std::to_string(pid);
+    if (::rmdir(cg.c_str()) != 0) {
+        std::error_code ec;
+        fs::remove_all(cg, ec);  // a plain directory (tests); cgroupfs refuses, harmlessly
+    }
+}
+
+void Host::exited(pid_t pid, int status) {
+    auto it = procs_.find(pid);
+    if (it != procs_.end()) it->second.state = "exited " + status_str(status);
+    cg_release(pid);
 }
 
 std::string Host::real(const std::string& p) const {
@@ -391,11 +497,11 @@ ToolResult Host::call(const std::string& name, const Args& args) {
 }
 
 ToolResult Host::cap(std::string body) const {
-    if (body.size() <= cfg_.max_result_bytes) return {std::move(body)};
+    if (body.size() <= cfg_.max_result_bytes) return {sanitize_utf8(body)};
     size_t n = body.size();
-    body.resize(cfg_.max_result_bytes);
-    body += "\n[truncated: " + std::to_string(n - cfg_.max_result_bytes) + " more bytes]";
-    return {std::move(body), true};
+    body = utf8_whole(body.substr(0, cfg_.max_result_bytes));
+    body += "\n[truncated: " + std::to_string(n - body.size()) + " more bytes]";
+    return {sanitize_utf8(body), true};
 }
 
 // ---------------------------------------------------------------- read
@@ -407,34 +513,34 @@ ToolResult Host::t_read(const Args& a) {
     long long len = a.count("len") && !a.at("len").empty() ? to_int(a.at("len"), "len") : -1;
     if (off < 0) throw ArgError{"offset must be >= 0"};
 
-    std::string data;
     std::error_code ec;
     if (fs::is_directory(real(path), ec)) return err("read: " + path + " is a directory; use stat with list=1");
-    if (!read_all(resolve(path), data)) return err("read: " + path + ": " + std::strerror(errno));
-    size_t total = data.size();
-    size_t start = std::min<size_t>(off, total);
-    size_t want = len < 0 ? total - start : std::min<size_t>(len, total - start);
+    // One page plus a byte, so we know whether there is more.
+    size_t page = cfg_.max_result_bytes;
+    size_t limit = len < 0 ? page + 1 : std::min<size_t>((size_t)len, page + 1);
+    std::string chunk;
+    long long total;
+    if (!read_range(resolve(path), (size_t)off, limit, chunk, total))
+        return err("read: " + path + ": " + std::strerror(errno));
+    size_t start = (size_t)off;
+    bool more = chunk.size() > page || (len < 0 && total >= 0 && start + chunk.size() < (size_t)total);
+    if (chunk.size() > page) chunk.resize(page);
 
-    std::string chunk = data.substr(start, want);
     bool text = valid_utf8(chunk);
-    // Hexdump triples the size, so a binary page covers fewer bytes.
-    size_t budget = text ? cfg_.max_result_bytes : cfg_.max_result_bytes / 5;
-    bool cut = chunk.size() > budget;
-    if (cut) chunk.resize(budget);
+    // Hexdump is ~5x the bytes, so a binary page covers less.
+    size_t budget = text ? page : page / 5;
+    if (chunk.size() > budget) { chunk.resize(budget); more = true; }
+    if (text) chunk = utf8_whole(chunk);
     size_t end = start + chunk.size();
+    std::string of = total >= 0 ? std::to_string(total) : std::string("?");
 
-    std::string body;
-    if (text) {
-        body = chunk;
-    } else {
-        body = "[binary: hexdump of bytes " + std::to_string(start) + "-" + std::to_string(end) +
-               " of " + std::to_string(total) + "]\n" + hexdump(chunk, start);
-    }
-    if (cut) {
-        body += "\n[truncated: bytes " + std::to_string(start) + "-" + std::to_string(end) + " of " +
-                std::to_string(total) + "; read offset=" + std::to_string(end) + " to continue]";
-    }
-    return {body, cut};
+    std::string body = text ? chunk
+                            : "[binary: hexdump of bytes " + std::to_string(start) + "-" + std::to_string(end) +
+                                  " of " + of + "]\n" + hexdump(chunk, start);
+    if (more)
+        body += "\n[truncated: bytes " + std::to_string(start) + "-" + std::to_string(end) + " of " + of +
+                "; read offset=" + std::to_string(end) + " to continue]";
+    return {body, more};
 }
 
 // ---------------------------------------------------------------- write
@@ -504,7 +610,7 @@ void Host::reap_nohang() {
     for (auto& [pid, p] : procs_) {
         if (p.state != "running" || p.mode == "capture") continue;
         int st;
-        if (::waitpid(pid, &st, WNOHANG) == pid) { p.state = "exited " + status_str(st); changed = true; }
+        if (::waitpid(pid, &st, WNOHANG) == pid) { p.state = "exited " + status_str(st); cg_release(pid); changed = true; }
     }
     if (changed) write_procs();
 }
@@ -529,35 +635,37 @@ ToolResult Host::t_spawn(const Args& a) {
     for (auto& s : argv) cargv.push_back(const_cast<char*>(s.c_str()));
     cargv.push_back(nullptr);
 
-    int inpipe[2] = {-1, -1}, outpipe[2] = {-1, -1}, execpipe[2];
-    if (mode == "capture") {
-        if (::pipe2(inpipe, O_CLOEXEC) || ::pipe2(outpipe, O_CLOEXEC)) return err("spawn: pipe failed");
-    }
-    if (::pipe2(execpipe, O_CLOEXEC)) return err("spawn: pipe failed");
+    int inpipe[2] = {-1, -1}, outpipe[2] = {-1, -1}, execpipe[2] = {-1, -1}, gopipe[2] = {-1, -1};
+    int conf = -1, ptm = -1;
+    auto close_all = [&] {
+        for (int* fd : {&inpipe[0], &inpipe[1], &outpipe[0], &outpipe[1], &execpipe[0], &execpipe[1],
+                        &gopipe[0], &gopipe[1], &conf, &ptm})
+            if (*fd >= 0) { ::close(*fd); *fd = -1; }
+    };
+    auto fail = [&](const std::string& m) { close_all(); return err(m); };
+    if (mode == "capture" && (::pipe2(inpipe, O_CLOEXEC) || ::pipe2(outpipe, O_CLOEXEC)))
+        return fail("spawn: pipe failed");
+    if (::pipe2(execpipe, O_CLOEXEC) || ::pipe2(gopipe, O_CLOEXEC)) return fail("spawn: pipe failed");
 
     if (mode == "background") {
         fs::create_directories(real("/state/log"));
     }
     // tty mode: the child gets its own pty and the harness proxies it to the
     // console, so it can see the escape chord and keep the output tail.
-    int conf = -1, ptm = -1;
     std::string pts;
     if (mode == "tty") {
         conf = ::open(cfg_.tty_path.c_str(), O_RDWR | O_NOCTTY | O_CLOEXEC);
-        if (conf < 0) return err("spawn: tty " + cfg_.tty_path + ": " + std::strerror(errno));
+        if (conf < 0) return fail("spawn: tty " + cfg_.tty_path + ": " + std::strerror(errno));
         ptm = ::posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
-        if (ptm < 0 || ::grantpt(ptm) || ::unlockpt(ptm)) { ::close(conf); return err("spawn: no pty available"); }
+        if (ptm < 0 || ::grantpt(ptm) || ::unlockpt(ptm)) return fail("spawn: no pty available");
         pts = ::ptsname(ptm);
         struct winsize ws;
         if (::ioctl(conf, TIOCGWINSZ, &ws) == 0) ::ioctl(ptm, TIOCSWINSZ, &ws);
     }
 
-    // The child waits for the parent to set up its cgroup before exec.
-    int gopipe[2];
-    if (::pipe2(gopipe, O_CLOEXEC)) return err("spawn: pipe failed");
-
+    // The child waits on gopipe for the parent to set up its cgroup before exec.
     pid_t pid = ::fork();
-    if (pid < 0) return err("spawn: fork failed");
+    if (pid < 0) return fail("spawn: fork failed");
     if (pid == 0) {
         if (mode == "tty") ::setsid();  // new session; must not be a group leader first
         else ::setpgid(0, 0);
@@ -598,9 +706,9 @@ ToolResult Host::t_spawn(const Args& a) {
         ::_exit(127);
     }
     if (mode != "tty") ::setpgid(pid, pid);
-    ::close(gopipe[0]);
-    ::close(execpipe[1]);
-    if (inpipe[0] >= 0) { ::close(inpipe[0]); ::close(outpipe[1]); }
+    ::close(gopipe[0]); gopipe[0] = -1;
+    ::close(execpipe[1]); execpipe[1] = -1;
+    if (inpipe[0] >= 0) { ::close(inpipe[0]); inpipe[0] = -1; ::close(outpipe[1]); outpipe[1] = -1; }
 
     if (!cfg_.cgroup_root.empty()) {
         fs::path cg = fs::path(cfg_.cgroup_root) / "potemkin" / std::to_string(pid);
@@ -611,16 +719,15 @@ ToolResult Host::t_spawn(const Args& a) {
         write_file(cg / "cgroup.procs", std::to_string(pid));
     }
     (void)!::write(gopipe[1], "g", 1);
-    ::close(gopipe[1]);
+    ::close(gopipe[1]); gopipe[1] = -1;
 
     int eno = 0;
     ssize_t got = ::read(execpipe[0], &eno, sizeof eno);
-    ::close(execpipe[0]);
+    ::close(execpipe[0]); execpipe[0] = -1;
     if (got == sizeof eno) {
         ::waitpid(pid, nullptr, 0);
-        if (inpipe[1] >= 0) { ::close(inpipe[1]); ::close(outpipe[0]); }
-        if (conf >= 0) { ::close(conf); ::close(ptm); }
-        return err("spawn: exec " + exe + ": " + std::strerror(eno));
+        cg_release(pid);
+        return fail("spawn: exec " + exe + ": " + std::strerror(eno));
     }
 
     std::string argv_line = exe.substr(exe.rfind('/') + 1);
@@ -640,10 +747,9 @@ ToolResult Host::t_spawn(const Args& a) {
     if (mode == "tty") {
         // Only an explicit timeout applies: the default 60 s would kill a shell.
         long long tmo = a.count("timeout_s") ? timeout : 0;
-        TtyResult r = proxy_tty(conf, ptm, pid, tmo);
-        ::close(conf);
-        ::close(ptm);
-        procs_[pid].state = "exited " + status_str(r.status);
+        TtyResult r = proxy_tty(conf, ptm, pid, tmo, [&] { kill_tree(pid); });
+        close_all();
+        exited(pid, r.status);
         write_procs();
         procs_.erase(pid);
         write_procs();
@@ -653,26 +759,37 @@ ToolResult Host::t_spawn(const Args& a) {
         return cap(head + "\n" + tail(strip_ansi(r.tail), 2048));
     }
 
-    // capture: feed stdin, collect output until exit or timeout.
+    // capture: feed stdin, keep a rolling tail of the output, return when the
+    // child exits (a daemon it started may keep the pipe open) or times out.
+    // timeout_s=0 means no timeout, as in tty mode.
     std::string out;
-    size_t in_off = 0;
+    size_t dropped = 0, in_off = 0;
     if (in.empty()) { ::close(inpipe[1]); inpipe[1] = -1; }
     else ::fcntl(inpipe[1], F_SETFL, O_NONBLOCK);
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout);
-    bool timed_out = false;
-    const size_t keep = cfg_.max_result_bytes * 4;  // bound memory; cap() trims later
+    auto t0 = std::chrono::steady_clock::now();
+    bool timed_out = false, done = false;
+    int st = 0;
+    const size_t keep = cfg_.max_result_bytes * 2;
+    std::chrono::steady_clock::time_point drain_until{};
     while (outpipe[0] >= 0) {
         auto now = std::chrono::steady_clock::now();
-        if (now >= deadline) { timed_out = true; break; }
-        int ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+        if (!done && ::waitpid(pid, &st, WNOHANG) == pid) {
+            done = true;
+            drain_until = now + std::chrono::milliseconds(100);
+        }
+        if (done && now >= drain_until) break;
+        if (!done && timeout > 0 && now - t0 >= std::chrono::seconds(timeout)) { timed_out = true; break; }
         struct pollfd fds[2] = {{outpipe[0], POLLIN, 0}, {inpipe[1], POLLOUT, 0}};
         int nf = inpipe[1] >= 0 ? 2 : 1;
-        if (::poll(fds, nf, std::min(ms, 1000)) < 0 && errno != EINTR) break;
+        if (::poll(fds, nf, done ? 20 : 50) < 0 && errno != EINTR) break;
         if (fds[0].revents & (POLLIN | POLLHUP)) {
             char buf[65536];
             ssize_t r = ::read(outpipe[0], buf, sizeof buf);
             if (r <= 0) { ::close(outpipe[0]); outpipe[0] = -1; }
-            else if (out.size() < keep) out.append(buf, std::min<size_t>(r, keep - out.size()));
+            else {
+                out.append(buf, r);
+                if (out.size() > keep * 2) { dropped += out.size() - keep; out.erase(0, out.size() - keep); }
+            }
         }
         if (nf == 2 && (fds[1].revents & (POLLOUT | POLLERR | POLLHUP))) {
             ssize_t w = ::write(inpipe[1], in.data() + in_off, in.size() - in_off);
@@ -680,19 +797,15 @@ ToolResult Host::t_spawn(const Args& a) {
             if (w < 0 || in_off >= in.size()) { ::close(inpipe[1]); inpipe[1] = -1; }
         }
     }
-    if (inpipe[1] >= 0) ::close(inpipe[1]);
-    if (outpipe[0] >= 0) ::close(outpipe[0]);
-    int st = 0;
-    if (timed_out) ::kill(-pid, SIGKILL);
-    ::waitpid(pid, &st, 0);
-    procs_[pid].state = "exited " + status_str(st);
-    write_procs();
+    if (timed_out) kill_tree(pid);
+    if (!done) ::waitpid(pid, &st, 0);
+    close_all();
+    exited(pid, st);
     procs_.erase(pid);  // capture children don't linger in the table
     write_procs();
     std::string head = timed_out ? "timeout after " + std::to_string(timeout) + "s, killed; " + status_str(st)
                                  : status_str(st);
-    if (out.size() > cfg_.max_result_bytes) out = tail(out, cfg_.max_result_bytes - 64);
-    return cap(head + "\n" + out);
+    return cap(head + "\n" + tail(out, cfg_.max_result_bytes - 64, dropped));
 }
 
 ToolResult Host::t_wait(const Args& a) {
@@ -704,7 +817,8 @@ ToolResult Host::t_wait(const Args& a) {
     Proc& p = it->second;
     if (!sig.empty() && p.state == "running") {
         int s = parse_signal(sig);
-        if (::kill(-pid, s) != 0 && ::kill(pid, s) != 0)
+        if (s == SIGKILL) kill_tree(pid);
+        else if (::kill(-pid, s) != 0 && ::kill(pid, s) != 0)
             return err("wait: signal " + sig + ": " + std::strerror(errno));
     }
     if (p.state == "running") {
@@ -712,7 +826,7 @@ ToolResult Host::t_wait(const Args& a) {
         int st;
         for (;;) {
             pid_t r = ::waitpid(pid, &st, WNOHANG);
-            if (r == pid) { p.state = "exited " + status_str(st); break; }
+            if (r == pid) { exited(pid, st); break; }
             if (std::chrono::steady_clock::now() >= deadline) break;
             ::usleep(20000);
         }
@@ -721,8 +835,12 @@ ToolResult Host::t_wait(const Args& a) {
     std::string out = p.state == "running" ? "still running" : p.state.substr(7);
     if (!p.log.empty()) {
         std::string log;
-        read_all(real(p.log), log);
-        out += "\n" + tail(log, 2048);
+        long long total;
+        std::error_code ec;
+        size_t size = fs::file_size(real(p.log), ec);
+        size_t from = !ec && size > 2048 ? size - 2048 : 0;
+        read_range(real(p.log), from, 2048, log, total);
+        out += "\n" + tail(log, 2048, from);
     }
     return cap(out);
 }
@@ -766,13 +884,15 @@ ToolResult Host::t_compile(const Args& a) {
     for (auto& s : cfg_.cc) argv.push_back(s == "@SRC@" ? (tmp / "source.c").string() : s);
     bool placed = std::find(cfg_.cc.begin(), cfg_.cc.end(), "@SRC@") != cfg_.cc.end();
     if (!placed) argv.push_back((tmp / "source.c").string());
-    for (auto& o : split_argv(opts)) argv.insert(argv.begin() + 1, o);
+    std::vector<std::string> extra = split_argv(opts);
+    argv.insert(argv.begin() + 1, extra.begin(), extra.end());
     argv.push_back("-o");
     argv.push_back((tmp / "bin").string());
 
     int outp[2];
     if (::pipe2(outp, O_CLOEXEC)) return err("compile: pipe failed");
     pid_t pid = ::fork();
+    if (pid < 0) { ::close(outp[0]); ::close(outp[1]); fs::remove_all(tmp, ec); return err("compile: fork failed"); }
     if (pid == 0) {
         ::dup2(outp[1], 1);
         ::dup2(outp[1], 2);
@@ -839,9 +959,10 @@ ToolResult Host::t_snapshot(const Args& a) {
     std::string killed;
     for (auto& [pid, p] : procs_) {
         if (p.snapshot_epoch >= id && p.state == "running") {
-            ::kill(-pid, SIGKILL);
+            kill_tree(pid);
             int st;
             ::waitpid(pid, &st, 0);
+            cg_release(pid);
             p.state = "killed by rollback";
             killed += " " + std::to_string(pid);
         }

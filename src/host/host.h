@@ -24,12 +24,12 @@ struct Config {
     std::vector<std::string> cc;       // compiler argv prefix; source file + "-o out" appended
     std::string model_name = "unknown";
     bool netboot = false;
-    bool isolate = false;
+    bool isolate = false;              // dev: children chroot into root via user+mount namespaces
     // Model path prefix -> host path (dev: /usr/lib/potemkin -> build/sysroot).
     std::vector<std::pair<std::string, std::string>> mounts;
     // netboot: url -> body; set err on failure. Kept out of the host library
     // so it needs no HTTP or TLS code.
-    std::function<std::string(const std::string& url, std::string& err)> fetcher;              // dev: children chroot into root via user+mount namespaces
+    std::function<std::string(const std::string& url, std::string& err)> fetcher;
 };
 
 struct Proc {
@@ -63,6 +63,9 @@ private:
     ToolResult cap(std::string body) const;
     void write_procs();
     void reap_nohang();
+    void kill_tree(pid_t pid);    // whole cgroup when there is one, else the process group
+    void cg_release(pid_t pid);   // drop an exited child's cgroup
+    void exited(pid_t pid, int status);
 
     Config cfg_;
     int turn_ = 0;

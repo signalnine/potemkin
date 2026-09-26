@@ -64,6 +64,9 @@ bool read_line(int fd, std::string& line) {
     for (;;) {
         ssize_t r = ::read(fd, &c, 1);
         if (r < 0 && errno == EINTR) { line.clear(); return true; }  // Ctrl-C at the prompt: drop the line
+        // Ctrl-D on a terminal is not a way out: reloading the weights takes
+        // minutes. Only a real EOF (a pipe, a closed pty) ends the loop.
+        if (r == 0 && line.empty() && ::isatty(fd)) { (void)!::write(fd, "\r\n> ", 4); continue; }
         if (r <= 0) return !line.empty();
         if (c == '\n') return true;
         line += c;

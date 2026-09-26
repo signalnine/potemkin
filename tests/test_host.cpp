@@ -14,6 +14,7 @@
 #include <chrono>
 #include <signal.h>
 #include <sstream>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -100,6 +101,65 @@ TEST(mounts_map_model_paths) { Env e; fs::path sys = e.root / "hostside"; spit(s
 TEST(read_proc) { Config c; c.root = ""; Host h(c);
     auto r = h.call("read", {{"path", "/proc/self/status"}}); HAS(r.body, "Name:"); }
 
+// review fixes
+static bool utf8_ok(const std::string& s) {  // strict: no overlongs, no surrogates, <= U+10FFFF
+    size_t i = 0;
+    while (i < s.size()) {
+        unsigned char c = s[i];
+        int n = c < 0x80 ? 1 : (c >= 0xC2 && c <= 0xDF) ? 2 : (c >= 0xE0 && c <= 0xEF) ? 3 : (c >= 0xF0 && c <= 0xF4) ? 4 : 0;
+        if (!n || i + n > s.size()) return false;
+        for (int k = 1; k < n; ++k) if ((static_cast<unsigned char>(s[i + k]) & 0xC0) != 0x80) return false;
+        i += n;
+    }
+    return true;
+}
+TEST(read_endless_device_is_bounded) { Config c; c.root = ""; Host h(c);
+    auto t0 = std::chrono::steady_clock::now();
+    auto r = h.call("read", {{"path", "/dev/zero"}, {"len", "16"}});
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2)); HAS(r.body, "00 00 00 00");
+    auto u = h.call("read", {{"path", "/dev/urandom"}});  // no len: still bounded
+    CHECK(u.body.size() < 20000); }
+TEST(read_offset_does_not_slurp) { Env e; Host h(e.cfg);
+    std::string big(3 << 20, 'x'); big.replace(2 << 20, 5, "HELLO"); spit(e.root / "big", big);
+    CHECK(h.call("read", {{"path", "/big"}, {"offset", std::to_string(2 << 20)}, {"len", "5"}}).body == "HELLO"); }
+TEST(read_cut_keeps_utf8_whole) { Env e; e.cfg.max_result_bytes = 100; Host h(e.cfg);
+    std::string s(99, 'a'); s += "\u2500\u2500\u2500"; spit(e.root / "f", s);
+    auto r = h.call("read", {{"path", "/f"}}); CHECK(r.truncated); CHECK(utf8_ok(r.body)); }
+TEST(spawn_binary_output_is_valid_utf8) { Config c; c.root = ""; Host h(c);
+    auto r = h.call("spawn", {{"exe", "/usr/bin/head"}, {"argv", "-c 300 /dev/urandom"}});
+    HAS(r.body, "exit=0"); CHECK(utf8_ok(r.body)); }
+TEST(spawn_capture_keeps_real_tail) { Config c; c.root = ""; Host h(c);
+    auto r = h.call("spawn", {{"exe", "/usr/bin/seq"}, {"argv", "1 100000"}});
+    HAS(r.body, "exit=0"); HAS(r.body, "\n100000\n"); HAS(r.body, "omitted"); }
+TEST(spawn_capture_returns_when_child_exits) { Config c; c.root = ""; Host h(c);
+    auto t0 = std::chrono::steady_clock::now();
+    auto r = h.call("spawn", {{"exe", "/bin/sh"}, {"argv", "-c 'sleep 3 & echo started'"}, {"timeout_s", "20"}});
+    HAS(r.body, "exit=0"); HAS(r.body, "started"); LACKS(r.body, "timeout");
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2)); }
+TEST(compile_opts_in_order) { Env e; Host h(e.cfg);
+    auto b = h.call("compile", {{"lang", "c"}, {"name", "x"}, {"opts", "-D X=3 -D Y=4"},
+                                {"source", "#include <stdio.h>\nint main(void){ printf(\"%d\\n\", X*Y); return 0; }\n"}}).body;
+    HAS(b, "exit=0");
+    HAS(h.call("spawn", {{"exe", "/generated/bin/x"}}).body, "12"); }
+TEST(snapshot_skips_special_files) { Env e; Host h(e.cfg); spit(e.root / "state/t", "x");
+    mkfifo((e.root / "state/fifo").c_str(), 0644);
+    CHECK(h.call("snapshot", {}).body == "snapshot=1"); CHECK(slurp(e.root / "snapshots/1/state/t") == "x"); }
+TEST(snapshot_ids_continue_across_restarts) { Env e;
+    { Host h(e.cfg); h.call("snapshot", {}); h.call("snapshot", {}); }
+    Host h(e.cfg); CHECK(h.call("snapshot", {}).body == "snapshot=3");
+    LACKS(h.call("snapshot", {{"rollback", "1"}}).body, "error"); }
+TEST(kill_uses_cgroup_kill) { Env e; fs::path cg = e.root / "cg"; fs::create_directories(cg); e.cfg.cgroup_root = cg.string();
+    fs::create_directories(e.root / "bin"); fs::create_symlink("/bin/sleep", e.root / "bin/sleep");
+    Host h(e.cfg);
+    auto b = h.call("spawn", {{"exe", "/bin/sleep"}, {"argv", "30"}, {"mode", "background"}}).body;
+    std::string pid = pid_of(b);
+    h.call("wait", {{"pid", pid}, {"signal", "KILL"}});
+    CHECK(slurp(cg / "potemkin" / pid / "cgroup.kill") == "1" || !fs::exists(cg / "potemkin" / pid)); }
+TEST(cgroup_removed_after_exit) { Env e; fs::path cg = e.root / "cg"; fs::create_directories(cg); e.cfg.cgroup_root = cg.string();
+    Config c = e.cfg; c.root = ""; Host h(c);
+    h.call("spawn", {{"exe", "/bin/true"}});
+    int n = 0; std::error_code ec; for (auto& d : fs::directory_iterator(cg / "potemkin", ec)) { (void)d; ++n; }
+    CHECK(n == 0); }
 // ---- write ----
 TEST(write_creates_parents) { Env e; Host h(e.cfg);
     auto r = h.call("write", {{"path", "/generated/src/x/y.c"}, {"content", "int main(){}"}});
@@ -142,15 +202,16 @@ TEST(procs_table) { Env e; Host h(e.cfg); fs::create_directories(e.root / "bin")
     h.call("wait", {{"pid", std::to_string(pid)}, {"signal", "KILL"}});
     HAS(slurp(e.root / "state/procs"), "exited"); }
 TEST(spawn_cgroup_files) { Env e; fs::path cg = e.root / "cg"; fs::create_directories(cg); e.cfg.cgroup_root = cg.string();
-    Config c = e.cfg; c.root = ""; Host h(c);
-    auto b = h.call("spawn", {{"exe", "/bin/true"}, {"mem_mb", "64"}});
-    HAS(b.body, "exit=0");
-    bool found = false;
-    for (auto& d : fs::directory_iterator(cg / "potemkin")) {
-        found = true; CHECK(slurp(d.path() / "memory.max") == std::to_string(64ll << 20)); CHECK(slurp(d.path() / "pids.max") == "256");
-        HAS(slurp(d.path() / "cgroup.procs"), ""); }
-    CHECK(found); }
-
+    Config c = e.cfg; c.root = ""; c.snapshot_dir = e.root.string() + "/snapshots"; Host h(c);
+    fs::create_directories(e.root / "state/log");
+    Config c2 = e.cfg; Host h2(c2);  // background needs /state/log under a root
+    fs::create_directories(e.root / "bin"); fs::create_symlink("/bin/sleep", e.root / "bin/sleep");
+    auto b = h2.call("spawn", {{"exe", "/bin/sleep"}, {"argv", "30"}, {"mode", "background"}, {"mem_mb", "64"}}).body;
+    fs::path d = cg / "potemkin" / pid_of(b);
+    CHECK(slurp(d / "memory.max") == std::to_string(64ll << 20)); CHECK(slurp(d / "pids.max") == "256");
+    CHECK(slurp(d / "cgroup.procs") == pid_of(b));
+    h2.call("wait", {{"pid", pid_of(b)}, {"signal", "KILL"}});
+    CHECK(!fs::exists(d)); }
 // ---- tty mode ----
 // A pty pair stands in for /dev/tty1: the test holds the master (the "user"),
 // the Host opens the slave as its console.
@@ -169,6 +230,7 @@ struct FakeConsole {
         return out;
     }
 };
+
 TEST(tty_runs_child) { FakeConsole con; Config c; c.root = ""; c.tty_path = con.slave; Host h(c);
     std::string seen; std::thread t([&] { seen = con.drain(1500); });
     auto b = h.call("spawn", {{"exe", "/bin/echo"}, {"argv", "via-pty"}, {"mode", "tty"}}).body;
@@ -188,6 +250,16 @@ TEST(tty_single_ctrl_bracket_passes_through) { FakeConsole con; Config c; c.root
     std::thread t([&] { usleep(300000); con.type("\x1dx\n"); usleep(200000); con.type("\x04"); con.drain(800); });
     auto b = h.call("spawn", {{"exe", "/bin/cat"}, {"mode", "tty"}}).body;
     t.join(); HAS(b, "exit=0"); LACKS(b, "escape"); }
+
+TEST(tty_child_closing_terminal_does_not_spin) { FakeConsole con; Config c; c.root = ""; c.tty_path = con.slave; Host h(c);
+    std::thread t([&] { con.drain(2500); });
+    struct rusage r0, r1; getrusage(RUSAGE_SELF, &r0);
+    auto b = h.call("spawn", {{"exe", "/bin/sh"}, {"argv", "-c 'exec 0<&- 1>&- 2>&-; sleep 2'"}, {"mode", "tty"}}).body;
+    getrusage(RUSAGE_SELF, &r1); t.join();
+    HAS(b, "exit=0");
+    double cpu = (r1.ru_utime.tv_sec - r0.ru_utime.tv_sec) + (r1.ru_stime.tv_sec - r0.ru_stime.tv_sec) +
+                 ((r1.ru_utime.tv_usec - r0.ru_utime.tv_usec) + (r1.ru_stime.tv_usec - r0.ru_stime.tv_usec)) / 1e6;
+    CHECK(cpu < 0.5); }
 
 // ---- dev isolation ----
 static const char* kLsRoot =

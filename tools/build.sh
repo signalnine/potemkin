@@ -14,9 +14,11 @@ if [[ $what == test || $what == all ]]; then
   g++ $CXXF -o build/test_host tests/test_host.cpp src/host/host.cpp
   g++ $CXXF -o build/test_harness tests/test_harness.cpp src/harness/harness.cpp src/host/host.cpp
   g++ $CXXF -pthread -o build/test_api tests/test_api.cpp src/api/backend_api.cpp src/harness/harness.cpp src/host/host.cpp
-  ./build/test_host | tail -1
-  ./build/test_harness | tail -1
-  ./build/test_api | tail -1
+  # Tests spawn, signal and read devices; run each binary in its own session
+  # with a memory cap so a bad test cannot take the terminal down with it.
+  for t in test_host test_harness test_api; do
+    setsid bash -c "ulimit -v 4000000; timeout -s KILL 600 ./build/$t" < /dev/null 2>&1 | tail -1
+  done
 fi
 
 if [[ $what == init || $what == all ]]; then
