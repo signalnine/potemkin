@@ -101,6 +101,12 @@ public:
             pcache_ = std::make_unique<q27::PrefixCache>();
             pcache_init(pc);
         }
+        {
+            size_t free_b = 0, total_b = 0;
+            cudaMemGetInfo(&free_b, &total_b);
+            fprintf(stderr, "q27-init: ctx %d (%s KV, %.2f GB free after weights%s)\n", ctx,
+                    getenv("Q27_KV") ? getenv("Q27_KV") : "fp16", free_b / 1e9, o.dflash2.empty() ? "" : ", DFlash2");
+        }
         eng_ = std::make_unique<Engine>(*model_, *dm_, ctx);
         eng_->fast_head = true;
         if (pcache_ && pcache_->enabled()) eng_->pcache = pcache_.get();

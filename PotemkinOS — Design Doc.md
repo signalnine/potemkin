@@ -287,8 +287,8 @@ Still open:
 
 - [ ] sm\_87 is not in the tri-arch build. Adding it is a `-gencode` line if the kernels are Ampere-generic; the Bonsai variant lives in its own tree and needs the same. Orin is a build, not a port.
 - [ ] Bonsai 2 on Orin: does 6 GB weights + KV + kernel + `q27-init` actually fit in 8 GB shared at a usable context length? Needs a measurement, not an estimate.
-- [ ] DFlash2 on 24 GB: q4s 15.7 GB + 2.1 GB drafter + `Q27_DFLASH2_RESERVE_GB=3` + KV. Does it fit at a usable window, or does the 3090 run the MTP ladder at 102 t/s?
-- [ ] No Bonsai drafter exists. The `bonsai` path runs plain decode on the ternary kernels; whether MTP heads survive ternary quant is unknown.
+- [x] DFlash2 on 24 GB: **fits.** Measured 2026-09-26 on a bare 3090 with the tri-arch W_MAX=8 build (the W12 graph set OOMs on 24 GB): q4s + DFlash2 Q8 + 3 GB reserve auto-sizes to a 94,208-token turbo5k window and decodes at 162-169 t/s on codegen; the MTP ladder on the same card gets 262,144 tokens at 98-118 t/s.
+- [x] MTP heads **survive ternary quant.** Measured 2026-09-26 on a 3090 with the 12g build: `bonsai2-27b-t3-mtp-slim` (6.49 GB) accepts 3.2-5.3 tokens/round and decodes at 104-148 t/s, against 75 t/s for the plain `t3-slim` pack (6.06 GB). Default `model=bonsai` to the MTP pack where it fits; the q27 installer notes it may not fit an 8 GB card with a desktop on it.
 - [ ] tcc vs. a bigger compiler. tcc's C subset may frustrate a 27B that keeps reaching for GNU extensions. If it does, the fallback is shipping gcc and admitting it.
 - [ ] Is `ip=dhcp` enough for the VM, or do people need the model to bring up wifi on bare metal? Wifi is a lot of userland to vibecode.
 - [ ] The tool-call parser recovers 22 catalogued drift modes for the qwen35 XML dialect. The eight PotemkinOS tools need to be rendered in that dialect, not a new one, or the drift corpus stops protecting you.
