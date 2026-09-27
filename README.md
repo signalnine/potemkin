@@ -174,3 +174,9 @@ A PTX backend for `compile` so the model can rewrite its own inference engine;
 capability manifests on `spawn`; a reconcile-on-boot flag so someone can film
 a village regenerating from `/intent`; an agent-only board where villages
 trade skills. (what could go wrong??)
+
+## License
+
+MIT, see [LICENSE](LICENSE). Built images also carry tcc (LGPL) and musl
+(MIT) from the distro archive, plus glibc and NVIDIA's driver pieces; if you
+redistribute an image, their terms come with it.

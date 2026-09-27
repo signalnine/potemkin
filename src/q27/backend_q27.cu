@@ -16,8 +16,8 @@ namespace {
 using json = nlohmann::json;
 using q27::StreamSplitter;
 
-// Copied verbatim from q27's server.cu (ReasoningBudgetObserver), which keeps
-// it at file scope; see docs/q27-api.md.
+// Copied verbatim from q27's server.cu (ReasoningBudgetObserver, MIT,
+// https://github.com/signalnine/q27), which keeps it at file scope; see docs/q27-api.md.
 // Reasoning budgets are observed through Engine::on_round before host emission.
 // The whole accepted round is parsed first, so a natural close later in that
 // round wins. When an overshooting round would consume reserved close/answer
