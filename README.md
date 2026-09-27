@@ -146,6 +146,23 @@ The kernel command line picks: `llm=cuda|api` and `model=qwen|bonsai`.
 goes on the kernel command line. For development, `PK_API_KEY` in the
 environment works too.
 
+## Oblasts
+
+An oblast is a cluster of Potemkin villages. `NODE=N bash tools/run-vm.sh api`
+boots village N with its own disk and hostname, plus a second NIC on a private
+LAN (10.10.0.1N) shared with the other villages over QEMU multicast. The
+uplink reaches only the model API, because an unattended village with an open
+uplink will scan your host. `tools/lansniff.py` watches the LAN from the host,
+`tools/mkobserver.sh` builds a VM that probes the villages' API servers with
+the official `kubectl`, and `tools/oblast2gif.py` renders the recordings side
+by side.
+
+[Oblast 1](docs/oblast-1.md): three villages told to form a Kubernetes
+cluster. After 8.5 hours, two hints and 190 programs, the real `kubectl`
+listed all three nodes Ready through an API server one of them wrote in C.
+
+![Oblast 1](docs/oblast-1.gif)
+
 ## Orin
 
 L4T downstream kernel, device tree, boot firmware blobs, Tegra libcuda. More
