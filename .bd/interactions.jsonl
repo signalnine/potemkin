@@ -27,3 +27,4 @@
 {"id":"int-de41e590","kind":"field_change","created_at":"2026-09-27T04:27:34.096471163Z","actor":"Gabe Ortiz","issue_id":"pk-4zo.3","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"done 2764553"}}
 {"id":"int-9f628912","kind":"field_change","created_at":"2026-09-27T04:27:34.406621725Z","actor":"Gabe Ortiz","issue_id":"pk-4zo.4","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"done 2764553"}}
 {"id":"int-f20c8ea7","kind":"field_change","created_at":"2026-09-27T04:27:34.711603725Z","actor":"Gabe Ortiz","issue_id":"pk-4zo.7","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"done 2764553"}}
+{"id":"int-c8ecb5df","kind":"field_change","created_at":"2026-09-27T04:46:54.406184718Z","actor":"Gabe Ortiz","issue_id":"pk-4zo.1","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"16 findings fixed 778ad49"}}
