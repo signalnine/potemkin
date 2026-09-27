@@ -214,7 +214,9 @@ bool copy_tree(const fs::path& from, const fs::path& to, std::string& why, const
     if (!fs::exists(from, ec)) return true;
     for (auto it = fs::recursive_directory_iterator(from, ec); !ec && it != fs::recursive_directory_iterator();
          it.increment(ec)) {
-        fs::path rel = fs::relative(it->path(), from, ec);
+        // Lexical: fs::relative canonicalizes, which follows /generated/bin/x
+        // into /store and out of the snapshot.
+        fs::path rel = it->path().lexically_relative(from);
         if (!skip.empty() && *rel.begin() == skip) {
             if (it->is_directory()) it.disable_recursion_pending();
             continue;

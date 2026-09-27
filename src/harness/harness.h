@@ -83,7 +83,7 @@ private:
     HarnessConfig cfg_;
     std::vector<Message> msgs_;
     int turn_ = 0;
-    int turn_snapshot_ = 0;              // snapshot id taken this turn, 0 = none yet
+    int turn_snapshot_ = 0;              // snapshot id taken this turn, 0 = none yet, -1 = failed
     std::vector<int> undo_stack_;        // snapshot ids, one per mutating turn
     size_t turn_start_ = SIZE_MAX;       // index of this turn's user message, while it is in msgs_
     std::string cur_request_;            // this turn's request, kept across history shedding

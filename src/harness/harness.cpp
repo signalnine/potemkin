@@ -274,6 +274,9 @@ void Harness::run_call(const ToolCallRec& c) {
         if (r.rfind("snapshot=", 0) == 0) {
             turn_snapshot_ = std::atoi(r.c_str() + 9);
             undo_stack_.push_back(turn_snapshot_);
+        } else {
+            turn_snapshot_ = -1;  // tried and failed: say so once, don't retry per call
+            con_.note("  (no checkpoint for this turn, /undo will skip it: " + first_line(r).substr(0, 160) + ")");
         }
         save_transcript();
     }

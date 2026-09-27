@@ -10,6 +10,8 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <map>
 #include <sstream>
 #include <unistd.h>
@@ -126,6 +128,14 @@ TEST(one_snapshot_per_mutating_turn) { Env e; Host h(e.hc); FakeBackend b; Captu
                 calls({call("write", {{"path", "/generated/c"}, {"content", "3"}})}), text("ok")};
     H.handle_line("go"); CHECK(count_snaps(e.root) == 1);
     CHECK(!fs::exists(e.root / "snapshots/1/generated/a")); }
+TEST(failed_checkpoint_is_said_once) { Env e; Host h(e.hc); FakeBackend b; CaptureConsole c; Harness H(b, h, c, e.cfg);
+    if (::geteuid() == 0) return;
+    spit(e.root / "state/locked", "x"); chmod((e.root / "state/locked").c_str(), 0000);
+    b.script = {calls({call("write", {{"path", "/generated/a"}, {"content", "1"}}), call("write", {{"path", "/generated/b"}, {"content", "2"}})}),
+                calls({call("write", {{"path", "/generated/c"}, {"content", "3"}})}), text("ok")};
+    H.handle_line("go"); chmod((e.root / "state/locked").c_str(), 0644);
+    size_t n = 0; for (size_t p = c.all.find("no checkpoint"); p != std::string::npos; p = c.all.find("no checkpoint", p + 1)) ++n;
+    CHECK(n == 1); HAS(c.all, "/undo"); CHECK(fs::exists(e.root / "generated/c")); }
 TEST(undo_restores_files_and_conversation) { Env e; Host h(e.hc); FakeBackend b; CaptureConsole c; Harness H(b, h, c, e.cfg);
     b.script = {text("first reply"), calls({call("write", {{"path", "/generated/a"}, {"content", "1"}})}), text("wrote a"), text("after")};
     H.handle_line("one"); H.handle_line("two");

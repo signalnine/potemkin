@@ -400,6 +400,15 @@ TEST(sha256_vectors) {
 TEST(snapshot_create) { Env e; Host h(e.cfg); spit(e.root / "generated/a", "1");
     CHECK(h.call("snapshot", {}).body == "snapshot=1"); CHECK(h.call("snapshot", {}).body == "snapshot=2");
     CHECK(slurp(e.root / "snapshots/1/generated/a") == "1"); }
+// On the image /generated/bin/<name> -> /store/... resolves; a link whose
+// target exists must be copied as a link, inside the snapshot.
+TEST(snapshot_keeps_resolving_symlinks) { Env e; Host h(e.cfg); spit(e.root / "store/bin", "b");
+    fs::create_symlink(e.root / "store/bin", e.root / "generated/bin/tool");
+    CHECK(h.call("snapshot", {}).body == "snapshot=1");
+    CHECK(fs::is_symlink(e.root / "snapshots/1/generated/bin/tool"));
+    fs::remove(e.root / "generated/bin/tool");
+    LACKS(h.call("snapshot", {{"rollback", "1"}}).body, "error");
+    CHECK(fs::is_symlink(e.root / "generated/bin/tool")); CHECK(slurp(e.root / "generated/bin/tool") == "b"); }
 TEST(snapshot_rollback) { Env e; Host h(e.cfg); spit(e.root / "generated/a", "1"); spit(e.root / "state/t", "x");
     h.call("snapshot", {});
     spit(e.root / "generated/a", "2"); spit(e.root / "generated/new", "n"); spit(e.root / "state/t", "y");
