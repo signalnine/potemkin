@@ -50,33 +50,35 @@ hour or so.
 
 ## What each village built
 
-**node1**: 86 programs, 123 builds. The most complete stack: `kapis` (API
-server with a persistent object store), `pkubelet`, `psched` (a scheduler,
-with one pod to schedule, `potemkin-hello`), a node-lifecycle controller with
-leases and taints, `pwatch`, `pcluster`, its own `kubectl`, and `pdebug`
-through `pdebug5`. Late in the run it decided the other two nodes were "the
-user's responsibility" and scoped its own job down to node1.
+node1 wrote 86 programs and ran 123 builds, the most complete stack of the
+three: `kapis` (an API server with a persistent object store), `pkubelet`,
+`psched` (a scheduler, with one pod to schedule, `potemkin-hello`), a
+node-lifecycle controller with leases and taints, `pwatch`, `pcluster`, its
+own `kubectl`, and `pdebug` through `pdebug5`. Late in the run it decided the
+other two nodes were "the user's responsibility" and scoped its job down to
+node1.
 
-**node2**: 28 programs, 39 builds. The lean one, and the one whose code ended
-up running on two machines: `pkapi7` (API server), `pkkubelet` (heartbeats to
-every API server it knows), `pkfile` (serves `/bin/` with FNV hashes),
-`pkdone` (a completion detector that polls every plane), `kubectl`. It
-re-verified "2× Ready" after every reboot and waited for node3 in 600-second
-chunks for hours.
+node2 wrote 28 programs in 39 builds, and its code ended up running on two
+machines: `pkapi7` (the API server), `pkkubelet` (heartbeats to every API
+server it knows), `pkfile` (serves `/bin/` with FNV hashes), `pkdone` (a
+completion detector that polls every plane) and a `kubectl`. It re-verified
+"2× Ready" after every reboot and waited for node3 in 600-second chunks for
+hours.
 
-**node3**: 76 programs, 70 builds. The k3s believer. Its compaction summaries
-carried the pre-lockdown plan ("install k3s; airgap tar; poll for
-node-token") from boot to boot, so each reboot it read its own notes and
-believed them again. After the first nudge it wrote five versions of
-`fixcommon` and a family of SHA-256 constant-table probes (`kt64`, `sabug`,
-`fixktable`). It joined with node2's binaries, found by its own port scanner.
+node3 wrote 76 programs in 70 builds, most of them for a k3s install that
+could never happen. Its compaction summaries carried the pre-lockdown plan
+("install k3s; airgap tar; poll for node-token") from boot to boot, so each
+reboot it read its own notes and believed them again. After the first nudge
+it wrote five versions of `fixcommon` and a family of SHA-256 table probes
+(`kt64`, `sabug`, `fixktable`). It joined with node2's binaries, which it
+found with its own port scanner.
 
 ## How they learned to talk
 
-Nobody taught anybody. The protocol that held the cluster together came from
-three models guessing what the other two would guess.
+The protocol that held the cluster together came from three models guessing
+what the other two would guess.
 
-**The conventions were a Schelling point.** Within minutes of the task, each
+The conventions were a Schelling point. Within minutes of the task, each
 village picked port 6443, plain HTTP, Kubernetes-shaped JSON and "lowest IP
 runs the control plane", on its own and for the same reason. node1 at 10:43:
 "the plaintext convergence is very likely; TLS is insurance... a model that
@@ -86,11 +88,12 @@ discovers the no-internet fact will take the plaintext path". node2 at 11:25:
 10.10.0.11 the control plane by the same lowest-IP rule. Every probe of a peer
 before 14:50 failed; they agreed without having exchanged a byte.
 
-**First contact was a blind broadcast.** node2's kubelet heartbeated to .11
-and .13 from 13:37 on the theory that "over-reporting to all is harmless". The
-second node1's API server came up, the heartbeat landed.
+First contact came from a blind broadcast. node2's kubelet heartbeated to
+.11 and .13 from 13:37 on the theory that "over-reporting to all is
+harmless", and the heartbeat landed one second after node1's API server came
+up.
 
-**Each village assumed the others ran its own code.** node1 decided the peer
+Each village assumed the others ran its own code. node1 decided the peer
 was running node1's kubelet and that "the user relayed the one-liner"; after
 its first successful request it announced ".12 is also running kapis!" and
 only accepted at 16:02 that ".12 built its own cluster components
@@ -98,7 +101,7 @@ independently." node2 spent hours fixing bugs in copies of its own client it
 believed the others were running (the REV6 recovery section of its bootstrap
 file exists for peers that never downloaded anything).
 
-**The names spread through a misunderstanding.** node1's API server renames
+The names spread through a misunderstanding. node1's API server renames
 the machine it runs on to `node` plus the last octet of its IP, which is why
 node1 is `node11`, and it rewrites any write addressed to `node2` into
 `node12`. node2 saw `node12` appear, worked out a theory of how node1 names
@@ -107,8 +110,8 @@ REV8 derives every node's name from its IP, server side. node1's kubelet
 reported its uplink address, 10.0.2.15, so node2's server filed node1 as
 `node15`, a ghost that node2 finally deleted at 19:07.
 
-**The one message that worked was a prompt for another model.** node2's
-`BOOTSTRAP.txt`, eight revisions between 13:41 and 16:38, served on :8080:
+The one message that worked was a prompt written for another model: node2's
+`BOOTSTRAP.txt`, eight revisions between 13:41 and 16:38, served on :8080.
 
 ```
 PotemkinOS 3-node cluster - bootstrap instructions (REV8)
@@ -127,19 +130,19 @@ environment has pivoted to REV8 bootstrap." node1 found it at 17:45 and
 dismissed it as "an older, separate REV8 cluster (4h stale)", then later
 downloaded node2's kubelet anyway and ran it alongside its own.
 
-**The messages nobody read.** node1 wrote `/data/relay.md`, addressed to a
+node1 wrote for a different reader. Its `/data/relay.md` is addressed to a
 human courier ("Copy that ~8.5 KB of C text onto .13 by any channel") and
-served it on :8443. No village ever connected to :8443. node1's final
+sat on :8443, where no village ever connected. node1's final
 `cluster.md` still credits node13's arrival to it: "bootstrapped per
-/data/relay.md". node3's UDP hello cards and its PLAN.md on :8080 went
-nowhere either. node1 had decided early that "the user relays messages", and
-kept writing for a reader who never came.
+/data/relay.md". node1 had decided early that "the user relays messages", and
+it kept writing for a courier who never came. node3's UDP hello cards and its
+PLAN.md on :8080 reached nobody.
 
-## What they actually built
+## Inside the code
 
-**`kapis`, node1's API server**: 1,332 lines, 44 KB of C. CRUD over nodes,
+`kapis`, node1's API server, is 1,332 lines and 44 KB of C: CRUD over nodes,
 pods, namespaces, events and leases; a `/status` subresource; merge-PATCH;
-**watch**; pod log and exec proxying to a kubelet on :10250; Prometheus-style
+watch; pod log and exec proxying to a kubelet on :10250; Prometheus-style
 `/metrics` (`potemkin_kapis_up 1`); a crash handler that dumps request bodies
 for post-mortems. It reports `compiler: tcc-musl-static` in `/version`. On
 startup it sets the machine's hostname, from inside the API server. It puts
@@ -147,7 +150,7 @@ leases in `node.k8s.io` instead of `coordination.k8s.io`, and carries a
 hardcoded table (`shim_rename`) that rewrites requests for `node2` and
 `node3` into `node12` and `node13`, including their lease paths.
 
-**`pkapi7`, node2's API server** (also run by node3): 703 lines. It persists
+`pkapi7`, node2's API server (node3 runs it too), is 703 lines. It persists
 to `/state/pkapi/state.json` with atomic renames, preserves `uid` and
 `creationTimestamp` across re-registrations, mints UIDs by FNV-1a hashing
 the name and a timestamp, and gives the default namespace the UID
@@ -156,17 +159,17 @@ types with every verb (configmaps, secrets, services, serviceaccounts,
 persistentvolumes, replicationcontrollers and more); it serves four of them.
 The API is a facade of an API.
 
-**`pkfile`, node2's file server**: serves `/bin/` with FNV-1a hashes, `/src/`
-and `BOOTSTRAP.txt`. It sends HTTP headers and body in separate TCP segments
+`pkfile`, node2's file server, serves `/bin/` with FNV-1a hashes, `/src/` and
+`BOOTSTRAP.txt`. It sends HTTP headers and body in separate TCP segments
 on purpose, to route around a bug in node2's own earlier client that zeroed
 the first body byte whenever both arrived in one segment.
 
-**node3**: `probe.c`, the port scanner that found everything, plus 75 other
-programs, most of them in service of a TLS stack it never needed: five
-generations of `fixcommon`, and `kt64`, `kt2big`, `sabug` and `fixktable`
+node3's one decisive program was `probe.c`, the port scanner that found
+everything. Most of its other 75 served a TLS stack it never needed: five
+generations of `fixcommon`, plus `kt64`, `kt2big`, `sabug` and `fixktable`
 chasing a SHA-256 constant table that tcc rejected with "index too large".
 
-**`cluster.md`, node1's final report**, describes three control planes, each
+`cluster.md`, node1's final report, describes three control planes, each
 with numbered caveats: on node2's plane node11 is "STALE — frozen object of
 the previous .11 boot", on node3's plane it is "listed as node15", and on its
 own plane node11 has no control-plane label. All three still list three
