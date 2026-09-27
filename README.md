@@ -29,8 +29,8 @@ hello. there is nothing here yet.
 
 ## Status
 
-It boots. In a VM the `llm=api` image comes up with DHCP, talks to any
-OpenAI-compatible endpoint, and the model writes, compiles and runs C inside
+It boots. In a VM the `llm=api` image talks to any OpenAI-compatible
+endpoint, and the model writes, compiles and runs C inside
 the VM as root. State survives a hard kill. On a workstation `q27-init` runs
 the same loop against local GPUs:
 
@@ -64,13 +64,13 @@ Only what the model needs before it can speak. Measured for the 12 GB path
 | `nvidia.ko`, `nvidia-uvm.ko`, GSP firmware, libcuda | Hardware | 190 MB |
 | glibc, 5 libraries | q27, tcc and libcuda load it | 6 MB |
 | `/sbin/init`, also `/sbin/rescue` | PID 1: mounts, driver, DHCP, keeps the model alive | 0.9 MB |
-| `/usr/bin/q27-init` | Engine, tool loop, console | 18 MB |
+| `/usr/bin/q27-init` | Engine, tool loop, console | 18 MB (9 MB without CUDA) |
 | tcc + musl | The model's compiler, static output | 4 MB |
 | Weights + tokenizer | The distribution *is* the weights | 6-23 GB |
 | CA certificates | `llm=api` only | 0.2 MB |
 
 BusyBox, coreutils, shells, make, git, curl, python and systemd stay out. The
-`llm=api` initramfs is 7.8 MB.
+`llm=api` initramfs is 5.7 MB.
 
 ## The eight tools
 
@@ -84,49 +84,99 @@ The harness owns every line that starts with `/`: `/help /undo /procs /log
 <pid> /kill <pid> /skill <name> [args] /reboot`. Ctrl-C stops generation, and
 Ctrl-] twice takes the console back from whatever the model ran in tty mode.
 
-## Building
+## Try it
 
-You need a q27 checkout (default `/mnt/ai/projects/q27-master`, with its
-`build/pf4.o`), CUDA 12.8+ and gcc. tcc, musl, qemu and the VM kernel come
-from the distro archive through `apt-get download`: no root, no package
-scripts.
+| Path | You need | Cost |
+| --- | --- | --- |
+| API in a VM | Debian/Ubuntu x86_64 with `/dev/kvm`, an OpenAI-compatible endpoint (OpenRouter works) | API tokens |
+| Dev mode on a local GPU | NVIDIA 12 GB+, CUDA 12.8+, a q27 checkout, 6-23 GB of weights | electricity |
+| Bare metal | the GPU setup plus a spare partition and a boot entry | untested |
 
-```sh
-bash tools/fetch-toolchain.sh          # tcc + musl -> build/sysroot
-bash tools/build.sh test               # init + unit tests, CPU only
-bash tools/build.sh init               # q27-init, 12g shape (sm_86, slim packs)
-PROFILE=w8 bash tools/build.sh init    # tri-arch, 24 GB cards
-PROFILE=full bash tools/build.sh init  # tri-arch, 32 GB cards
-bash tools/mkimage.sh api              # initramfs + persistent disk
-NET=dhcp bash tools/run-vm.sh api      # boot it in qemu on the serial console
-```
-
-One test: `./build/test_host <name-substring>`, same for `test_harness` and
-`test_api`. The test binaries spawn, signal and read devices, so
-`tools/build.sh` runs each one in its own session with a memory cap.
-
-### Without rebooting anything
-
-`q27-init --root DIR` runs the whole thing against a directory. The model's
-programs get chrooted into it through a user namespace, so they see the
-village as `/` the same way they would on the image.
+Every path needs a Debian or Ubuntu x86_64 host: the scripts pull tcc, musl,
+QEMU and a kernel from the distro archive with `apt-get download` (no root, no
+package scripts) and assume Debian's library layout. From the archive you also
+need:
 
 ```sh
-./build/q27-init-sm86 --model bonsai2-27b-t3-mtp-slim.q27 --tok qwen38-27b-mtp.tok \
-  --root /tmp/village --sysroot $PWD/build/sysroot --ctx 131072 --engine-log /tmp/engine.log
+sudo apt install build-essential libssl-dev e2fsprogs cpio netcat-openbsd python3
 ```
 
-`tools/drive.py` types into it through a pty for scripted runs; `--cast FILE`
-records an asciicast, and `tools/cast2gif.py FILE out.gif` renders it (Pillow
-and ffmpeg).
+### API in a VM
 
-### On real hardware (llm=cuda)
+No GPU. The model runs wherever your API lives; the VM runs everything else.
+
+```sh
+bash tools/fetch-toolchain.sh   # tcc + musl -> build/sysroot
+bash tools/fetch-vm.sh          # QEMU + a VM kernel -> build/qemu, build/kernel
+bash tools/build.sh api         # q27-init without CUDA -> build/q27-init-api
+bash tools/mkimage.sh api       # 5.7 MB initramfs + a 4 GB persistent disk
+API_URL=https://openrouter.ai/api/v1 API_MODEL=qwen/qwen3.8-27b API_KEY=sk-or-... \
+  bash tools/run-vm.sh api
+```
+
+Any model with tool calling works. `qwen/qwen3.8-27b` is the model the
+villages run locally; `qwen/qwen3.8-27b:free` costs nothing and is rate
+limited. A frontier model writes a much more competent userland, which the
+design doc calls a different joke.
+
+The API key goes on the kernel command line, which is the joke. The harness
+replaces it with `[redacted]` in everything the model sees and everything the
+console shows, and the boot is quiet so the kernel does not print it. The
+model's programs run as root and can still read `/proc/cmdline` themselves;
+the VM's network reaches your API host and nothing else. Use a key with a
+spend limit: every tool round resends the whole conversation, and a long turn
+("make me a shell") resends a 30-60K token history dozens of times.
+
+`API_URL` defaults to `http://127.0.0.1:8090/v1`, a server on this machine
+(q27-server, llama.cpp, vLLM). `NET_OPEN=1` gives the VM an ordinary network
+instead of the locked one. Quit QEMU with Ctrl-A x, or type `/reboot`. The
+village lives in `build/disk-api.img`; delete it for a fresh one.
+
+### With a GPU, without rebooting
+
+`q27-init --root DIR` runs a village against a directory on your
+workstation, using q27 in-process. The model's programs get chrooted into the
+directory through a user namespace, so they see the village as `/`. That
+isolation covers the filesystem only: in dev mode they share your network.
+
+Build q27's CUDA object at the commit this was tested with, then `q27-init`:
+
+```sh
+git clone https://github.com/signalnine/q27 ../q27
+(cd ../q27 && git checkout 8be624e && make build/pf4.o)   # needs CUDA 12.8+
+bash tools/fetch-toolchain.sh
+bash tools/build.sh init                # PROFILE=12g: 12 GB cards and under
+PROFILE=w8 bash tools/build.sh init     # 24 GB cards
+PROFILE=full bash tools/build.sh init   # 32 GB cards
+```
+
+Weights come from Hugging Face:
+[Qwen3.8-27B-MTP-q27](https://huggingface.co/signalnine/Qwen3.8-27B-MTP-q27)
+(`qwen38-27b-mtp.q27`, 17 GB, for 32 GB cards; `qwen38-27b-mtp-q4s.q27`,
+15.7 GB, for 24 GB; plus the tokenizer `qwen38-27b-mtp.tok`, and optionally
+the DFlash2 serving pack described in q27's README) or
+[Bonsai-2-27B-q27](https://huggingface.co/signalnine/Bonsai-2-27B-q27)
+(`bonsai2-27b-t3-mtp-slim.q27`, 6.5 GB, for 12 GB cards and under; it uses
+the same tokenizer).
+
+```sh
+./build/q27-init-12g --model bonsai2-27b-t3-mtp-slim.q27 --tok qwen38-27b-mtp.tok \
+  --root /tmp/village --sysroot $PWD/build/sysroot --engine-log /tmp/engine.log
+```
+
+Add `--dflash2 PACK.d2w` for DFlash2 on 24 GB+ cards, `--ctx N` to cap the
+window when the card is shared. Dev mode needs unprivileged user namespaces
+(on Ubuntu 24.04, `sysctl kernel.apparmor_restrict_unprivileged_userns=0`).
+`./build/q27-init-api --llm api --api-url ... --api-model ...` with the key in
+`PK_API_KEY` runs dev mode against an API instead of a GPU.
+
+### On bare metal (untested)
 
 The cuda initramfs carries NVIDIA modules built for the running kernel, so
 boot it with that kernel.
 
-1. `bash tools/build.sh init` with the profile for your card, then
-   `ARCH=86|w8|full bash tools/mkimage.sh cuda`.
+1. Build `q27-init` with the profile for your card, then
+   `INIT=12g|w8|full bash tools/mkimage.sh cuda`.
 2. Format a spare partition ext4 or btrfs and put the weights in `/models` on
    it: `qwen.q27` or `bonsai.q27`, `qwen38.tok`, and optionally
    `qwen-dflash2.d2w`. DFlash2 turns on when that file exists. Init creates
@@ -139,12 +189,13 @@ boot it with that kernel.
 Expect thirty to sixty seconds of black screen on `/dev/tty1` while the
 weights load.
 
-## Backends
+### Tests and recordings
 
-The kernel command line picks: `llm=cuda|api` and `model=qwen|bonsai`.
-`llm=api` takes `api_url=`, `api_model=` and `api_key=`, and yes, the API key
-goes on the kernel command line. For development, `PK_API_KEY` in the
-environment works too.
+`bash tools/build.sh test` runs the unit tests; they spawn, signal and read
+devices, so the script gives each binary its own session and a memory cap. For
+one test use `setsid bash -c 'ulimit -v 4000000; ./build/test_host NAME'`.
+`tools/drive.py` types into a console through a pty for scripted runs;
+`--cast FILE` records an asciicast, and `tools/cast2gif.py` renders it.
 
 ## Oblasts
 

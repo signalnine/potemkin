@@ -8,15 +8,15 @@ PoC in progress, tracked in bd (`bd ready`, `bd list --all`; prefix `pk`). `Pote
 
 ```sh
 bash tools/fetch-toolchain.sh          # tcc + musl -> build/sysroot (apt-get download, no root)
-bash tools/build.sh test               # /sbin/init + CPU unit tests (host, harness, api)
-bash tools/build.sh init               # q27-init, 12g shape (sm_86, W_MAX=8, PF_T=256) -> build/q27-init-sm86
-PROFILE=full bash tools/build.sh init  # tri-arch q27-init -> build/q27-init-smfull
-bash tools/mkimage.sh api|cuda         # initramfs + ext4 persistent disk under build/
-bash tools/run-vm.sh api               # qemu (extracted to build/qemu), serial console
-./build/test_host <substr>             # one test (same for test_harness, test_api)
+bash tools/fetch-vm.sh                 # QEMU + a checked VM kernel -> build/qemu, build/kernel
+bash tools/build.sh test               # /sbin/init + CPU unit tests (host, harness, api), isolated
+bash tools/build.sh api                # q27-init without CUDA (llm=api) -> build/q27-init-api
+bash tools/build.sh init               # q27-init with q27, PROFILE=12g|w8|full -> build/q27-init-$PROFILE
+bash tools/mkimage.sh api|cuda         # initramfs + ext4 disk; INIT=api|12g|w8|full picks the binary
+API_URL=... API_MODEL=... API_KEY=... bash tools/run-vm.sh api   # locked uplink; NET_OPEN=1, NODE=N
 ```
 
-q27 sources come from `Q27=/mnt/ai/projects/q27-master` (needs its `build/pf4.o`). Models: `/mnt/ai/models/bonsai2-27b/q27/*slim.q27` (pair with the 12g build), `/mnt/ai/models/qwen38-27b-mtp/*.q27`, tokenizer `qwen38-27b-mtp.tok`, DFlash2 pack `/mnt/ai/models/qwen38-27b-dflash2-bf16/qwen38-dflash2-q8-serve.d2w`.
+q27 sources come from `Q27` (default `../q27`; on this machine `/mnt/ai/projects/q27-master`, commit 8be624e, with `build/pf4.o`). json.hpp and httplib.h are vendored in `third_party/`. Models: `/mnt/ai/models/bonsai2-27b/q27/*slim.q27` (pair with the 12g build), `/mnt/ai/models/qwen38-27b-mtp/*.q27`, tokenizer `qwen38-27b-mtp.tok`, DFlash2 pack `/mnt/ai/models/qwen38-27b-dflash2-bf16/qwen38-dflash2-q8-serve.d2w`.
 
 Dev runs: `q27-init --root DIR ...` treats DIR as the village; children are chrooted into it via user+mount namespaces (`Config::isolate`), with /proc /sys /dev passed through. `tools/drive.py` drives the console through a pty (`~text` types into a tty-mode child, `~^]^]` sends the escape chord). Pin GPUs with `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0` (3090) or `=1` (5090); default CUDA ordering puts the 5090 first. The 5090 may be shared with the user's desktop apps; size `--ctx` explicitly there.
 
