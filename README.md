@@ -227,6 +227,12 @@ listed all three nodes Ready through an API server one of them wrote in C.
 
 ![Oblast 1](docs/oblast-1.gif)
 
+[Oblast 2](docs/oblast-2.md): the same task on DeepSeek V4.1 Flash. node2
+declared the cluster done after two and a half minutes, with two of its
+three nodes Ready because they answered ping. Nobody agreed on who runs the
+control plane, and when the real `kubectl` showed up on the LAN, node3
+noticed and started imitating a real API.
+
 ## Orin
 
 L4T downstream kernel, device tree, boot firmware blobs, Tegra libcuda. More
