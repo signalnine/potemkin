@@ -21,4 +21,4 @@ install -m 0755 tools/observer-init.sh "$o/root/init"
 (cd "$o/root" && find . | cpio -o -H newc --quiet) | gzip -1 > "$o/initramfs.gz"
 Q=build/qemu; K=$(ls build/kernel/boot/vmlinuz-* | head -1)
 echo "built $o/initramfs.gz; run it with:"
-echo "LD_LIBRARY_PATH=$Q/usr/lib/x86_64-linux-gnu $Q/usr/bin/qemu-system-x86_64 -L $Q/usr/share/qemu -L $Q/usr/share/seabios -L $Q/usr/lib/ipxe/qemu -enable-kvm -cpu host -m 2G -smp 2 -kernel $K -initrd $o/initramfs.gz -append 'console=ttyS0 quiet' -netdev socket,id=n1,mcast=230.0.0.1:1234 -device virtio-net-pci,netdev=n1,mac=52:54:00:10:00:20 -display none -serial file:$o/report.txt -no-reboot"
+echo "LD_LIBRARY_PATH=$Q/usr/lib/x86_64-linux-gnu $Q/usr/bin/qemu-system-x86_64 -L $Q/usr/share/qemu -L $Q/usr/share/seabios -L $Q/usr/lib/ipxe/qemu -enable-kvm -cpu host -m 2G -smp 2 -kernel $K -initrd $o/initramfs.gz -append 'console=ttyS0 quiet' -netdev socket,id=n1,mcast=230.0.0.1:1234,localaddr=127.0.0.1 -device virtio-net-pci,netdev=n1,mac=52:54:00:10:00:20 -display none -serial file:$o/report.txt -no-reboot"

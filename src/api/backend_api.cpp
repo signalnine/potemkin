@@ -41,11 +41,17 @@ public:
         GenResult res;
         ojson body;
         body["model"] = o_.model;
-        body["max_tokens"] = o_.max_tokens;
         body["stream"] = true;
         body["stream_options"] = {{"include_usage", true}};
         body["tools"] = tools_;
         body["messages"] = render(msgs);
+        // Servers like vLLM reject prompt + max_tokens > window outright, so
+        // ask for what fits. The prompt size is an estimate: ~3 bytes a token.
+        {
+            long est = (long)(body["messages"].dump(-1, ' ', false, ojson::error_handler_t::replace).size() + tools_.dump().size()) / 3;
+            long room = (long)o_.context - est - 256;
+            body["max_tokens"] = std::max(256L, std::min<long>(o_.max_tokens, room));
+        }
 
         httplib::Client cli(base_);
         cli.set_connection_timeout(std::min(o_.timeout_s, 30), 0);
@@ -58,14 +64,23 @@ public:
 
         std::string pending, raw;
         std::vector<PartialCall> calls;
-        std::string finish;
-        auto on_event = [&](const std::string& data) {
+        std::string finish, stream_err;
+        auto int_of = [](const json& v, int def) { return v.is_number_integer() ? v.get<int>() : def; };
+        auto on_event_body = [&](const std::string& data) {
             if (data == "[DONE]") return;
             json j = json::parse(data, nullptr, false);
             if (j.is_discarded() || !j.is_object()) return;
+            // OpenRouter and others report upstream failures inside the stream.
+            if (j.contains("error")) {
+                const json& e = j["error"];
+                stream_err = e.is_object() && e.contains("message") && e["message"].is_string()
+                                 ? e["message"].get<std::string>() : e.dump();
+                return;
+            }
             if (j.contains("usage") && j["usage"].is_object()) {
-                res.prompt_tokens = j["usage"].value("prompt_tokens", 0);
-                res.gen_tokens = j["usage"].value("completion_tokens", 0);
+                const json& u = j["usage"];
+                if (u.contains("prompt_tokens")) res.prompt_tokens = int_of(u["prompt_tokens"], res.prompt_tokens);
+                if (u.contains("completion_tokens")) res.gen_tokens = int_of(u["completion_tokens"], res.gen_tokens);
             }
             if (!j.contains("choices") || !j["choices"].is_array() || j["choices"].empty()) return;
             const json& ch = j["choices"][0];
@@ -85,7 +100,8 @@ public:
             }
             if (d.contains("tool_calls") && d["tool_calls"].is_array()) {
                 for (const json& tc : d["tool_calls"]) {
-                    size_t i = tc.value("index", 0);
+                    size_t i = tc.contains("index") ? (size_t)int_of(tc["index"], 0) : 0;
+                    if (i > 64) continue;
                     if (calls.size() <= i) calls.resize(i + 1);
                     if (tc.contains("function") && tc["function"].is_object()) {
                         const json& f = tc["function"];
@@ -95,6 +111,10 @@ public:
                     }
                 }
             }
+        };
+        // A malformed field in one chunk costs that chunk, not the process.
+        auto on_event = [&](const std::string& data) {
+            try { on_event_body(data); } catch (const std::exception&) {}
         };
         auto receiver = [&](const char* data, size_t n) {
             raw.append(data, std::min<size_t>(n, 4096 - std::min<size_t>(raw.size(), 4096)));
@@ -126,6 +146,11 @@ public:
             res.text = "api: HTTP " + std::to_string(r->status) + ": " + (raw.empty() ? r->body : raw).substr(0, 400);
             return res;
         }
+        if (!stream_err.empty() || finish == "error") {
+            res.end = "error";
+            res.text = "api: " + (stream_err.empty() ? std::string("the stream ended with finish_reason=error") : stream_err);
+            return res;
+        }
         for (auto& c : calls) {
             ToolCallRec rec;
             rec.name = c.name;
@@ -149,9 +174,14 @@ private:
     ojson render(const std::vector<Message>& msgs) {
         ojson out = ojson::array();
         std::vector<std::string> open_ids;  // ids awaiting their tool message
+        std::vector<ojson> deferred;        // results of unparseable calls
         size_t next = 0;
+        // Strict providers want an assistant's tool_calls followed directly by
+        // their tool messages, so results with no call id wait until the group ends.
+        auto flush = [&] { for (auto& d : deferred) out.push_back(d); deferred.clear(); };
         for (size_t mi = 0; mi < msgs.size(); ++mi) {
             const Message& m = msgs[mi];
+            if (m.role != "tool") flush();
             if (m.role == "assistant") {
                 ojson a;
                 a["role"] = "assistant";
@@ -179,12 +209,13 @@ private:
             } else if (m.role == "tool") {
                 std::string id = next < open_ids.size() ? open_ids[next] : "";
                 ++next;
-                if (id.empty()) out.push_back({{"role", "user"}, {"content", "[tool result] " + m.content}});
+                if (id.empty()) deferred.push_back({{"role", "user"}, {"content", "[tool result] " + m.content}});
                 else out.push_back({{"role", "tool"}, {"tool_call_id", id}, {"content", m.content}});
             } else {
                 out.push_back({{"role", m.role}, {"content", m.content}});
             }
         }
+        flush();
         return out;
     }
 

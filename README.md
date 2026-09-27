@@ -127,8 +127,12 @@ the VM's network reaches your API host and nothing else. Use a key with a
 spend limit: every tool round resends the whole conversation, and a long turn
 ("make me a shell") resends a 30-60K token history dozens of times.
 
+On the host, the key is visible in QEMU's command line to anyone who can run
+`ps` on your machine.
+
 `API_URL` defaults to `http://127.0.0.1:8090/v1`, a server on this machine
-(q27-server, llama.cpp, vLLM). `NET_OPEN=1` gives the VM an ordinary network
+(q27-server, llama.cpp, vLLM); set `API_CONTEXT` and `API_MAX_TOKENS` to match
+a small server's window. `NET_OPEN=1` gives the VM an ordinary network
 instead of the locked one. Quit QEMU with Ctrl-A x, or type `/reboot`. The
 village lives in `build/disk-api.img`; delete it for a fresh one.
 

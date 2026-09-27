@@ -2,6 +2,7 @@
 // Model-agnostic: generation goes through Backend, output through Console.
 #pragma once
 #include <atomic>
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -69,7 +70,7 @@ public:
 private:
     void user_turn(const std::string& content, const std::string& intent);
     void run_call(const ToolCallRec& c);
-    void save_transcript();
+    void save_transcript(size_t upto = SIZE_MAX);
     bool load_transcript();
     bool maybe_compact(const GenResult& r);  // true if the history was replaced
     Action slash(const std::string& line);
@@ -84,6 +85,9 @@ private:
     int turn_ = 0;
     int turn_snapshot_ = 0;              // snapshot id taken this turn, 0 = none yet
     std::vector<int> undo_stack_;        // snapshot ids, one per mutating turn
+    size_t turn_start_ = SIZE_MAX;       // index of this turn's user message, while it is in msgs_
+    std::string cur_request_;            // this turn's request, kept across history shedding
+    bool warned_disk_ = false;
 };
 
 // Frozen tool block: OpenAI-shaped, client-ordered JSON text.

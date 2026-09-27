@@ -205,14 +205,21 @@ std::string tail(const std::string& s, size_t n, size_t dropped = 0) {
 
 // Files, directories and symlinks; FIFOs, sockets and device nodes are left
 // out (fs::copy refuses them, and one would break every later snapshot).
-void copy_tree(const fs::path& from, const fs::path& to) {
-    fs::create_directories(to);
+// Returns false (with a reason) on the first copy error. `skip` names a
+// top-level entry left out (the logs under /state).
+bool copy_tree(const fs::path& from, const fs::path& to, std::string& why, const std::string& skip = "") {
     std::error_code ec;
-    if (!fs::exists(from, ec)) return;
-    for (auto it = fs::recursive_directory_iterator(from, fs::directory_options::skip_permission_denied, ec);
-         it != fs::recursive_directory_iterator(); it.increment(ec)) {
-        if (ec) break;
-        fs::path dst = to / fs::relative(it->path(), from, ec);
+    fs::create_directories(to, ec);
+    if (ec) { why = to.string() + ": " + ec.message(); return false; }
+    if (!fs::exists(from, ec)) return true;
+    for (auto it = fs::recursive_directory_iterator(from, ec); !ec && it != fs::recursive_directory_iterator();
+         it.increment(ec)) {
+        fs::path rel = fs::relative(it->path(), from, ec);
+        if (!skip.empty() && *rel.begin() == skip) {
+            if (it->is_directory()) it.disable_recursion_pending();
+            continue;
+        }
+        fs::path dst = to / rel;
         fs::file_status st = it->symlink_status(ec);
         if (fs::is_symlink(st)) {
             fs::remove(dst, ec);
@@ -222,7 +229,10 @@ void copy_tree(const fs::path& from, const fs::path& to) {
         } else if (fs::is_regular_file(st)) {
             fs::copy_file(it->path(), dst, fs::copy_options::overwrite_existing, ec);
         }
+        if (ec) { why = it->path().string() + ": " + ec.message(); return false; }
     }
+    if (ec) { why = from.string() + ": " + ec.message(); return false; }
+    return true;
 }
 
 // Drop CSI/OSC escape sequences and carriage returns so the model reads the
@@ -268,7 +278,16 @@ bool enter_village(const std::string& root) {
     return ::chroot(root.c_str()) == 0 && ::chdir("/") == 0;
 }
 
-std::string scrub(std::string s, const std::vector<std::string>& secrets) {
+// Same-length mask, so offsets and hexdump columns stay put.
+void mask_secrets(std::string& s, const std::vector<std::string>& secrets) {
+    for (auto& k : secrets) {
+        if (k.empty()) continue;
+        for (size_t p = s.find(k); p != std::string::npos; p = s.find(k, p + k.size()))
+            s.replace(p, k.size(), std::string(k.size(), '*'));
+    }
+}
+
+std::string scrub_all(std::string s, const std::vector<std::string>& secrets) {
     for (auto& k : secrets) {
         if (k.empty()) continue;
         for (size_t p; (p = s.find(k)) != std::string::npos;) s.replace(p, k.size(), "[redacted]");
@@ -482,6 +501,22 @@ Host::Host(Config c) : cfg_(std::move(c)) {
     std::error_code ec;
     if (cfg_.isolate && !cfg_.root.empty())
         for (const char* k : {"/proc", "/sys", "/dev"}) fs::create_directories(cfg_.root + k, ec);
+    // Children of a previous q27-init are nobody's now: kill them.
+    if (!cfg_.cgroup_root.empty()) {
+        bool any = false;
+        for (auto& d : fs::directory_iterator(fs::path(cfg_.cgroup_root) / "potemkin", ec)) {
+            if (!d.is_directory()) continue;
+            write_file(d.path() / "cgroup.kill", "1");
+            std::string procs;
+            long long total;
+            read_range((d.path() / "cgroup.procs").string(), 0, 65536, procs, total);
+            std::istringstream in(procs);
+            for (long long p; in >> p;) if (p > 1) ::kill((pid_t)p, SIGKILL);
+            if (::rmdir(d.path().c_str()) != 0) fs::remove_all(d.path(), ec);
+            any = true;
+        }
+        if (any && fs::exists(real("/state/procs"), ec)) write_procs();
+    }
     // Snapshot ids continue across restarts: rescue and /undo pick by id.
     for (auto& e : fs::directory_iterator(real(cfg_.snapshot_dir), ec)) {
         const std::string n = e.path().filename().string();
@@ -553,9 +588,11 @@ std::vector<std::string> Host::tool_names() const {
 
 ToolResult Host::call(const std::string& name, const Args& args) {
     ToolResult r = dispatch(name, args);
-    r.body = scrub(r.body, cfg_.secrets);
+    r.body = scrub_all(r.body, cfg_.secrets);
     return r;
 }
+
+std::string Host::scrub(const std::string& s) const { return scrub_all(s, cfg_.secrets); }
 
 ToolResult Host::dispatch(const std::string& name, const Args& args) {
     try {
@@ -600,8 +637,17 @@ ToolResult Host::t_read(const Args& a) {
     size_t limit = len < 0 ? page + 1 : std::min<size_t>((size_t)len, page + 1);
     std::string chunk;
     long long total;
-    if (!read_range(resolve(path), (size_t)off, limit, chunk, total))
+    // With secrets set, read key-length-1 bytes either side and mask before
+    // slicing: a key split across two reads, or across hexdump rows, is
+    // still a key.
+    size_t L = 0;
+    for (auto& k : cfg_.secrets) L = std::max(L, k.size());
+    size_t pre = L && off > 0 ? std::min<size_t>((size_t)off, L - 1) : 0;
+    std::string wide;
+    if (!read_range(resolve(path), (size_t)off - pre, pre + limit + (L ? L - 1 : 0), wide, total))
         return err("read: " + path + ": " + std::strerror(errno));
+    mask_secrets(wide, cfg_.secrets);
+    chunk = wide.size() > pre ? wide.substr(pre, limit) : "";
     size_t start = (size_t)off;
     bool more = chunk.size() > page || (len < 0 && total >= 0 && start + chunk.size() < (size_t)total);
     if (chunk.size() > page) chunk.resize(page);
@@ -749,6 +795,9 @@ ToolResult Host::t_spawn(const Args& a) {
     if (pid == 0) {
         if (mode == "tty") ::setsid();  // new session; must not be a group leader first
         else ::setpgid(0, 0);
+        // q27-init is -1000 (never the OOM victim); its children must be
+        // killable, or a program over its memory.max spins forever.
+        { int o = ::open("/proc/self/oom_score_adj", O_WRONLY | O_CLOEXEC); if (o >= 0) { (void)!::write(o, "0", 1); ::close(o); } }
         ::signal(SIGPIPE, SIG_DFL);
         ::signal(SIGINT, SIG_DFL);
         char go;
@@ -847,7 +896,7 @@ ToolResult Host::t_spawn(const Args& a) {
     if (in.empty()) { ::close(inpipe[1]); inpipe[1] = -1; }
     else ::fcntl(inpipe[1], F_SETFL, O_NONBLOCK);
     auto t0 = std::chrono::steady_clock::now();
-    bool timed_out = false, done = false;
+    bool timed_out = false, done = false, interrupted = false;
     int st = 0;
     const size_t keep = cfg_.max_result_bytes * 2;
     std::chrono::steady_clock::time_point drain_until{};
@@ -859,6 +908,7 @@ ToolResult Host::t_spawn(const Args& a) {
         }
         if (done && now >= drain_until) break;
         if (!done && timeout > 0 && now - t0 >= std::chrono::seconds(timeout)) { timed_out = true; break; }
+        if (!done && cfg_.cancel && cfg_.cancel->load()) { interrupted = true; break; }
         struct pollfd fds[2] = {{outpipe[0], POLLIN, 0}, {inpipe[1], POLLOUT, 0}};
         int nf = inpipe[1] >= 0 ? 2 : 1;
         if (::poll(fds, nf, done ? 20 : 50) < 0 && errno != EINTR) break;
@@ -877,14 +927,15 @@ ToolResult Host::t_spawn(const Args& a) {
             if (w < 0 || in_off >= in.size()) { ::close(inpipe[1]); inpipe[1] = -1; }
         }
     }
-    if (timed_out) kill_tree(pid);
+    if (timed_out || interrupted) kill_tree(pid);
     if (!done) ::waitpid(pid, &st, 0);
     close_all();
     exited(pid, st);
     procs_.erase(pid);  // capture children don't linger in the table
     write_procs();
     std::string head = timed_out ? "timeout after " + std::to_string(timeout) + "s, killed; " + status_str(st)
-                                 : status_str(st);
+                     : interrupted ? "interrupted by the user (Ctrl-C), killed; " + status_str(st)
+                                   : status_str(st);
     return cap(head + "\n" + tail(out, cfg_.max_result_bytes - 64, dropped));
 }
 
@@ -908,6 +959,7 @@ ToolResult Host::t_wait(const Args& a) {
             pid_t r = ::waitpid(pid, &st, WNOHANG);
             if (r == pid) { exited(pid, st); break; }
             if (std::chrono::steady_clock::now() >= deadline) break;
+            if (cfg_.cancel && cfg_.cancel->load()) return {"interrupted by the user (Ctrl-C); still running"};
             ::usleep(20000);
         }
         write_procs();
@@ -974,6 +1026,7 @@ ToolResult Host::t_compile(const Args& a) {
     pid_t pid = ::fork();
     if (pid < 0) { ::close(outp[0]); ::close(outp[1]); fs::remove_all(tmp, ec); return err("compile: fork failed"); }
     if (pid == 0) {
+        { int o = ::open("/proc/self/oom_score_adj", O_WRONLY | O_CLOEXEC); if (o >= 0) { (void)!::write(o, "0", 1); ::close(o); } }
         ::dup2(outp[1], 1);
         ::dup2(outp[1], 2);
         std::vector<char*> cv;
@@ -1026,9 +1079,19 @@ ToolResult Host::t_snapshot(const Args& a) {
         fs::path d = base / std::to_string(id);
         std::error_code ec;
         fs::remove_all(d, ec);
-        copy_tree(real("/generated"), d / "generated");
-        copy_tree(real("/state"), d / "state");
+        std::string why;
+        if (!copy_tree(real("/generated"), d / "generated", why) || !copy_tree(real("/state"), d / "state", why, "log")) {
+            fs::remove_all(d, ec);  // a partial snapshot would restore a partial village
+            return err("snapshot: " + why);
+        }
         snapshots_ = id;
+        // Keep the newest few; each one is a full copy.
+        for (auto& e : fs::directory_iterator(base, ec)) {
+            const std::string n = e.path().filename().string();
+            if (!n.empty() && n.find_first_not_of("0123456789") == std::string::npos &&
+                std::atoi(n.c_str()) <= id - (int)cfg_.keep_snapshots)
+                fs::remove_all(e.path(), ec);
+        }
         return {"snapshot=" + std::to_string(id)};
     }
     long long id = to_int(rb, "rollback");
@@ -1048,13 +1111,16 @@ ToolResult Host::t_snapshot(const Args& a) {
         }
     }
     std::error_code ec;
+    std::string why;
     for (const char* t : {"/generated", "/state"}) {
         fs::path live = real(t);
+        bool state = std::string(t) == "/state";
         if (fs::exists(live)) {
-            for (auto& e : fs::directory_iterator(live, ec)) fs::remove_all(e.path(), ec);
+            for (auto& e : fs::directory_iterator(live, ec))
+                if (!(state && e.path().filename() == "log")) fs::remove_all(e.path(), ec);  // logs are history
         }
         fs::path snap = d / fs::path(t).filename();
-        if (fs::exists(snap)) copy_tree(snap, live);
+        if (fs::exists(snap) && !copy_tree(snap, live, why)) return err("snapshot: rollback copy: " + why);
     }
     for (auto it = procs_.begin(); it != procs_.end();)
         it = it->second.state == "killed by rollback" ? procs_.erase(it) : std::next(it);

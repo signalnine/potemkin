@@ -1,5 +1,6 @@
 // Host primitives: the eight tools the model gets. See CONTRACT.md.
 #pragma once
+#include <atomic>
 #include <functional>
 #include <map>
 #include <string>
@@ -33,6 +34,9 @@ struct Config {
     // Values that must never appear in a tool result or on the console (the
     // api_key the kernel cmdline carries). Replaced with "[redacted]".
     std::vector<std::string> secrets;
+    // Set by Ctrl-C: long tool calls (capture, wait) give up and kill what they started.
+    const std::atomic<bool>* cancel = nullptr;
+    size_t keep_snapshots = 20;        // older snapshots are deleted
 };
 
 struct Proc {
@@ -50,8 +54,10 @@ public:
     ToolResult call(const std::string& name, const Args& args);
     std::vector<std::string> tool_names() const;
     void set_turn(int turn) { turn_ = turn; }
+    void set_cancel(const std::atomic<bool>* c) { cfg_.cancel = c; }
     std::string real(const std::string& model_path) const;     // root + path
     std::string resolve(const std::string& model_path) const;  // real(), following symlinks inside root
+    std::string scrub(const std::string& s) const;  // secrets -> [redacted], for anything shown
 
 private:
     ToolResult dispatch(const std::string& name, const Args& args);

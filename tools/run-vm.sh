@@ -5,17 +5,21 @@
 #   API_URL    OpenAI-compatible base URL as seen from THIS machine
 #              (default http://127.0.0.1:8090/v1, a q27-server on the host;
 #              e.g. https://openrouter.ai/api/v1)
-#   API_MODEL  model name the endpoint expects (e.g. qwen/qwen3.6-27b)
+#   API_MODEL  model name the endpoint expects (e.g. qwen/qwen3.8-27b)
+#   API_CONTEXT, API_MAX_TOKENS  the model's window and the per-reply cap, for
+#              small local servers (defaults 128000 and 32768)
 #   API_KEY    bearer token; it goes on the kernel cmdline, which is the joke.
 #              The harness scrubs it from everything the model sees, and the
-#              boot is made quiet so the kernel does not print it either.
+#              boot is made quiet so the kernel does not print it either. On
+#              this machine it is visible in QEMU's argv (ps) to other users.
 #
 # The VM's uplink reaches the API endpoint and nothing else: no internet, no
 # DNS, no services on this machine's loopback (an unattended village will
 # scan them). NET_OPEN=1 gives it the ordinary QEMU user network instead.
 #
 # NODE=N boots village N of an oblast: its own disk and hostname, plus a second
-# NIC on a private LAN (10.10.0.1N) shared with the other villages.
+# NIC on a private LAN (10.10.0.1N) shared with the other villages. The LAN is
+# UDP multicast pinned to loopback, so it never leaves this machine.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 flavor=${1:-api}
@@ -46,7 +50,7 @@ if [[ $flavor == api ]]; then
     # mapped to the forward address, so TLS still checks the real certificate.
     target=$host
     (( local_api )) && target=127.0.0.1
-    uplink="user,id=n0,restrict=on,guestfwd=tcp:10.0.2.100:$port-cmd:nc $target $port"
+    uplink="user,id=n0,restrict=on,guestfwd=tcp:10.0.2.100:$port-cmd:bash $PWD/tools/fwd.sh $target $port"
     if (( local_api )); then
       guest_url="$scheme://10.0.2.100:$port$path"
     else
@@ -55,6 +59,8 @@ if [[ $flavor == api ]]; then
     fi
   fi
   append+=" api_url=$guest_url api_model=${API_MODEL:-local}"
+  [[ -n ${API_CONTEXT:-} ]] && append+=" api_context=$API_CONTEXT"        # the model's window, default 128000
+  [[ -n ${API_MAX_TOKENS:-} ]] && append+=" api_max_tokens=$API_MAX_TOKENS"  # per reply, default 32768
   if [[ -n ${API_KEY:-} ]]; then
     append+=" api_key=$API_KEY quiet"
   fi
@@ -66,7 +72,7 @@ if [[ -n ${NODE:-} ]]; then
   [[ -f $disk ]] || cp --sparse=always build/disk-$flavor.img "$disk"
   append+=" potemkin.hostname=node$NODE potemkin.net2=10.10.0.1$NODE/24"
   nics=(-device virtio-net-pci,netdev=n0,mac=52:54:00:00:00:1$NODE
-        -netdev socket,id=n1,mcast=230.0.0.1:1234 -device virtio-net-pci,netdev=n1,mac=52:54:00:10:00:1$NODE)
+        -netdev socket,id=n1,mcast=230.0.0.1:1234,localaddr=127.0.0.1 -device virtio-net-pci,netdev=n1,mac=52:54:00:10:00:1$NODE)
 else
   nics=(-device virtio-net-pci,netdev=n0)
 fi

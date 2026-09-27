@@ -106,6 +106,7 @@ int main(int argc, char** argv) {
     if (kc.count("api_key")) ao.key = kc["api_key"];  // on the kernel cmdline, as designed
     if (kc.count("api_model")) ao.model = kc["api_model"];
     if (kc.count("api_context")) ao.context = std::atoi(kc["api_context"].c_str());  // compaction triggers at 3/4 of it
+    if (kc.count("api_max_tokens")) ao.max_tokens = std::atoi(kc["api_max_tokens"].c_str());
     if (const char* k = getenv("PK_API_KEY")) ao.key = k;  // dev: keep keys out of argv
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];

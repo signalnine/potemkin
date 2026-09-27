@@ -388,6 +388,12 @@ static void rescue(const char* tty) {
             // Swap the live trees for the snapshot's by renaming on the disk.
             char a[128], b[128];
             const char* both[] = {"state", "generated"};
+            int whole = 1;  // a second press finds the snapshot already used
+            for (int i = 0; i < 2; ++i) {
+                snprintf(b, sizeof b, "/persist/snapshots/%d/%s", best, both[i]);
+                if (access(b, F_OK) != 0) whole = 0;
+            }
+            if (!whole) { dprintf(fd, "\r\nsnapshot %d is incomplete or already restored; nothing moved\r\n", best); continue; }
             for (int i = 0; i < 2; ++i) {
                 snprintf(a, sizeof a, "/persist/%s", both[i]);
                 snprintf(b, sizeof b, "/persist/%s.before-rescue.%ld", both[i], (long)time(NULL));
@@ -414,8 +420,14 @@ static void rescue(const char* tty) {
 
 // ---------------------------------------------------------------- main
 
+extern char** environ;
+
 int main(int argc, char** argv) {
     (void)argc;
+    // The kernel hands unknown cmdline params to PID 1 as environment, so the
+    // api_key sits in /proc/1/environ. Overwrite it in place.
+    for (char** e = environ; e && *e; ++e)
+        if (!strncmp(*e, "api_key=", 8)) memset(*e + 8, '*', strlen(*e + 8));
     mnt("proc", "/proc", "proc", 0, NULL);
     mnt("sysfs", "/sys", "sysfs", 0, NULL);
     mnt("devtmpfs", "/dev", "devtmpfs", 0, NULL);

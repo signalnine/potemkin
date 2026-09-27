@@ -9,6 +9,7 @@
 #include <fstream>
 #include <functional>
 #include <thread>
+#include <atomic>
 #include <fcntl.h>
 #include <poll.h>
 #include <chrono>
@@ -265,7 +266,7 @@ TEST(tty_child_closing_terminal_does_not_spin) { FakeConsole con; Config c; c.ro
 static const char* kKey = "sk-or-v1-0123456789abcdef";
 TEST(secret_scrubbed_from_read) { Env e; e.cfg.secrets = {kKey}; Host h(e.cfg);
     spit(e.root / "cmdline", std::string("console=ttyS0 api_key=") + kKey + " llm=api\n");
-    auto b = h.call("read", {{"path", "/cmdline"}}).body; LACKS(b, kKey); HAS(b, "api_key=[redacted]"); }
+    auto b = h.call("read", {{"path", "/cmdline"}}).body; LACKS(b, kKey); HAS(b, "api_key=*************************"); }
 TEST(secret_scrubbed_from_capture) { Config c; c.root = ""; c.secrets = {kKey}; Host h(c);
     auto b = h.call("spawn", {{"exe", "/bin/echo"}, {"argv", std::string("key is ") + kKey}}).body;
     LACKS(b, kKey); HAS(b, "key is [redacted]"); }
@@ -278,6 +279,48 @@ TEST(secret_split_across_chunks_scrubbed) { FakeConsole con; Config c; c.root = 
     std::string half1(kKey, 10), half2(kKey + 10);
     h.call("spawn", {{"exe", "/bin/sh"}, {"argv", "-c 'printf %s " + half1 + "; sleep 0.5; printf %s " + half2 + "'"}, {"mode", "tty"}});
     t.join(); LACKS(seen, kKey); HAS(seen, "[redacted]"); }
+
+// ---- review round 2 ----
+TEST(secret_scrubbed_from_hexdump) { Env e; e.cfg.secrets = {kKey}; Host h(e.cfg);
+    std::string env = std::string("PATH=/\0api_key=", 15) + kKey + std::string("\0TERM=linux\0", 12);
+    spit(e.root / "environ", env);
+    auto b = h.call("read", {{"path", "/environ"}}).body;
+    HAS(b, "[binary: hexdump"); LACKS(b, "30 31 32 33 34 35"); LACKS(b, "0123456789"); }
+TEST(secret_scrubbed_across_read_windows) { Env e; e.cfg.secrets = {kKey}; Host h(e.cfg);
+    spit(e.root / "f", std::string("xx ") + kKey + " yy");
+    auto a = h.call("read", {{"path", "/f"}, {"offset", "0"}, {"len", "15"}}).body;
+    auto b = h.call("read", {{"path", "/f"}, {"offset", "15"}, {"len", "40"}}).body;
+    LACKS(a + b, "sk-or-v1-0123"); LACKS(a + b, "456789abcdef"); HAS(a, "xx "); HAS(b, " yy"); }
+TEST(snapshot_fails_cleanly_on_copy_error) { Env e; Host h(e.cfg); spit(e.root / "state/secretfile", "x");
+    chmod((e.root / "state/secretfile").c_str(), 0000);
+    auto b = h.call("snapshot", {}).body; chmod((e.root / "state/secretfile").c_str(), 0644);
+    if (::geteuid() != 0) { HAS(b, "error"); CHECK(!fs::exists(e.root / "snapshots/1")); } }
+TEST(snapshot_excludes_logs) { Env e; Host h(e.cfg); spit(e.root / "state/log/77", std::string(1000, 'l')); spit(e.root / "state/t", "x");
+    h.call("snapshot", {}); CHECK(fs::exists(e.root / "snapshots/1/state/t")); CHECK(!fs::exists(e.root / "snapshots/1/state/log/77"));
+    spit(e.root / "state/log/77", "newer"); h.call("snapshot", {{"rollback", "1"}});
+    CHECK(slurp(e.root / "state/log/77") == "newer"); }
+TEST(snapshots_pruned_to_last_20) { Env e; Host h(e.cfg);
+    for (int i = 0; i < 25; ++i) h.call("snapshot", {});
+    int n = 0; for (auto& d : fs::directory_iterator(e.root / "snapshots")) { (void)d; ++n; }
+    CHECK(n == 20); CHECK(!fs::exists(e.root / "snapshots/5")); CHECK(fs::exists(e.root / "snapshots/25")); }
+TEST(cancel_interrupts_capture) { Config c; c.root = ""; std::atomic<bool> cancel{false}; c.cancel = &cancel; Host h(c);
+    std::thread t([&] { usleep(300000); cancel = true; });
+    auto t0 = std::chrono::steady_clock::now();
+    auto b = h.call("spawn", {{"exe", "/bin/sleep"}, {"argv", "30"}, {"timeout_s", "0"}}).body;
+    t.join(); HAS(b, "interrupted"); CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(3)); }
+TEST(cancel_interrupts_wait) { Env e; std::atomic<bool> cancel{false}; e.cfg.cancel = &cancel; Host h(e.cfg);
+    fs::create_directories(e.root / "bin"); fs::create_symlink("/bin/sleep", e.root / "bin/sleep");
+    auto b = h.call("spawn", {{"exe", "/bin/sleep"}, {"argv", "30"}, {"mode", "background"}}).body;
+    std::thread t([&] { usleep(300000); cancel = true; });
+    auto t0 = std::chrono::steady_clock::now();
+    auto w = h.call("wait", {{"pid", pid_of(b)}, {"timeout_s", "60"}}).body;
+    t.join(); HAS(w, "interrupted"); CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(3));
+    cancel = false; h.call("wait", {{"pid", pid_of(b)}, {"signal", "KILL"}}); }
+TEST(leftover_cgroups_from_previous_life_are_killed) { Env e; fs::path cg = e.root / "cg"; e.cfg.cgroup_root = cg.string();
+    fs::create_directories(cg / "potemkin/424242"); spit(cg / "potemkin/424242/cgroup.procs", "424242");
+    spit(e.root / "state/procs", "424242 background running turn=3 daemon\n");
+    Host h(e.cfg);
+    CHECK(!fs::exists(cg / "potemkin/424242")); LACKS(slurp(e.root / "state/procs"), "424242"); }
 
 // ---- dev isolation ----
 static const char* kLsRoot =

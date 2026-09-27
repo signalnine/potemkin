@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include "json.hpp"
@@ -101,7 +102,12 @@ void Harness::drop_older_half() {
     msgs_.resize(1);
     msgs_.push_back({"user", "[harness] The context filled up and a summary did not fit, so the earlier "
                              "conversation was dropped. /intent/log and /state/summaries still have it.", "", {}});
+    // Mid-turn, the request may be in the dropped half; the model still needs it.
+    bool has_request = cur_request_.empty();
+    for (auto& m : kept) if (m.role == "user" && m.content == cur_request_) has_request = true;
+    if (!has_request) msgs_.push_back({"user", "[harness] The task you are working on: " + cur_request_, "", {}});
     msgs_.insert(msgs_.end(), kept.begin(), kept.end());
+    turn_start_ = SIZE_MAX;
     save_transcript();
 }
 
@@ -168,24 +174,48 @@ bool message_from_json(const std::string& line, Message& m) {
 
 Harness::Harness(Backend& be, Host& host, Console& con, HarnessConfig cfg)
     : be_(be), host_(host), con_(con), cfg_(std::move(cfg)) {
+    host_.set_cancel(&cancel);  // Ctrl-C reaches long tool calls too
     msgs_.push_back({"system", cfg_.system_prompt, "", {}});
     load_transcript();
 }
 
-void Harness::save_transcript() {
-    std::string out;
-    for (size_t i = 1; i < msgs_.size(); ++i) out += message_to_json(msgs_[i]) + "\n";
-    fs::path p = host_.real("/state/transcript.jsonl");
+// Write, check, fsync, rename: a full disk leaves the old file whole.
+static bool write_durably(const std::string& path, const std::string& data) {
     std::error_code ec;
-    fs::create_directories(p.parent_path(), ec);
-    std::string tmp = p.string() + ".tmp";
-    { std::ofstream f(tmp, std::ios::binary | std::ios::trunc); f << out; }
-    fs::rename(tmp, p, ec);
-    std::ofstream(host_.real("/state/turn"), std::ios::trunc) << turn_ << "\n";
+    fs::create_directories(fs::path(path).parent_path(), ec);
+    std::string tmp = path + ".tmp";
+    int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) return false;
+    size_t off = 0;
+    while (off < data.size()) {
+        ssize_t w = ::write(fd, data.data() + off, data.size() - off);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) break;
+        off += (size_t)w;
+    }
+    bool ok = off == data.size() && ::fsync(fd) == 0;
+    ::close(fd);
+    if (ok) fs::rename(tmp, path, ec);
+    if (!ok || ec) { fs::remove(tmp, ec); return false; }
+    return true;
+}
+
+// upto: how many messages to write (all by default). The lazy snapshot saves
+// the history as it stood before the turn, so /undo rewinds the request too.
+void Harness::save_transcript(size_t upto) {
+    std::string out;
+    for (size_t i = 1; i < msgs_.size() && i < upto; ++i) out += message_to_json(msgs_[i]) + "\n";
+    bool ok = write_durably(host_.real("/state/transcript.jsonl"), out);
+    ok = write_durably(host_.real("/state/turn"), std::to_string(upto == SIZE_MAX ? turn_ : turn_ - 1) + "\n") && ok;
     // /state is itself snapshotted, so rolling back to snapshot N restores the
     // stack as it was before N was pushed: exactly the ids still undoable.
-    std::ofstream u(host_.real("/state/undo"), std::ios::trunc);
-    for (int id : undo_stack_) u << id << "\n";
+    std::string u;
+    for (int id : undo_stack_) u += std::to_string(id) + "\n";
+    ok = write_durably(host_.real("/state/undo"), u) && ok;
+    if (!ok && !warned_disk_) {
+        con_.say("[harness] could not save the transcript (disk full?); the old copy is intact");
+        warned_disk_ = true;
+    }
 }
 
 bool Harness::load_transcript() {
@@ -238,11 +268,14 @@ void Harness::run_call(const ToolCallRec& c) {
         return;
     }
     if (mutates(c.name) && turn_snapshot_ == 0) {
+        // The snapshot must hold the history from before this turn.
+        if (turn_start_ != SIZE_MAX) save_transcript(turn_start_);
         std::string r = host_.call("snapshot", {}).body;
         if (r.rfind("snapshot=", 0) == 0) {
             turn_snapshot_ = std::atoi(r.c_str() + 9);
             undo_stack_.push_back(turn_snapshot_);
         }
+        save_transcript();
     }
     con_.note("  " + describe(c));
     Args a;
@@ -267,17 +300,28 @@ void Harness::user_turn(const std::string& content, const std::string& intent) {
         fs::create_directories(p.parent_path(), ec);
         std::ofstream(p, std::ios::app) << now_iso() << " turn=" << turn_ << " " << one << "\n";
     }
+    turn_start_ = msgs_.size();
+    cur_request_ = content;
     msgs_.push_back({"user", content, "", {}});
 
     GenResult last;
     int shrinks = 0;
     for (;;) {
-        GenResult r = be_.generate(msgs_, con_, cancel);
+        GenResult r;
+        try {
+            r = be_.generate(msgs_, con_, cancel);
+        } catch (const std::exception& ex) {  // a malformed server reply must not take the box down
+            r = GenResult{};
+            r.end = "error";
+            r.text = std::string("backend: ") + ex.what();
+        }
         // The history outgrew the model's window (a server said so, or the
         // local engine had no room left): shed the older half and retry.
-        bool too_long = r.end == "ctx-guard" ||
-                        (r.end == "error" && (r.text.find("context_length") != std::string::npos ||
-                                              r.text.find("too long") != std::string::npos));
+        bool too_long = r.end == "ctx-guard";
+        if (r.end == "error")
+            for (const char* k : {"context_length", "too long", "maximum context length", "context size",
+                                  "context window", "too many tokens", "HTTP 413"})
+                if (r.text.find(k) != std::string::npos) too_long = true;
         if (too_long && shrinks < 3 && msgs_.size() > 3) {
             ++shrinks;
             con_.note("  (history too long for the model; dropped the older half)");
@@ -295,7 +339,7 @@ void Harness::user_turn(const std::string& content, const std::string& intent) {
             con_.say("[backend error] " + r.text);
             // Nothing happened yet: the turn never happened. After tool rounds
             // the calls and their results stay, pairs intact.
-            if (msgs_.back().role == "user") { msgs_.pop_back(); --turn_; }
+            if (turn_start_ != SIZE_MAX && msgs_.size() == turn_start_ + 1) { msgs_.pop_back(); --turn_; }
             break;
         }
         msgs_.push_back({"assistant", r.text, r.reasoning, r.calls});
@@ -304,16 +348,30 @@ void Harness::user_turn(const std::string& content, const std::string& intent) {
                 con_.say("[reply cut off after " + std::to_string(r.gen_tokens) + " tokens]");
             break;
         }
-        for (auto& c : r.calls) run_call(c);
+        for (auto& c : r.calls) {
+            if (cancel) {  // every call still gets its result, or strict APIs reject the history
+                msgs_.push_back({"tool", "error: interrupted by the user before this ran", "", {}});
+                continue;
+            }
+            run_call(c);
+        }
         save_transcript();  // a turn can run for an hour; a crash mid-turn keeps the rounds
+        if (cancel) {
+            con_.say("[interrupted]");
+            break;
+        }
         // Turns like "form a cluster" never end, so compaction also runs
         // between rounds, where the history is at a clean ChatML boundary.
-        if (maybe_compact(r))
+        if (maybe_compact(r)) {
+            turn_start_ = SIZE_MAX;  // the turn's start is gone from the history
             msgs_.push_back({"user", "[harness] The conversation was compacted in the middle of this task. "
                                      "Continue where you left off.", "", {}});
+        }
     }
+    turn_start_ = SIZE_MAX;
     save_transcript();
     maybe_compact(last);
+    cur_request_.clear();
     ::sync();  // the VM can be killed and the power can go out; undo has to survive both
 }
 
@@ -342,6 +400,7 @@ bool Harness::maybe_compact(const GenResult& r) {
 }
 
 Action Harness::slash(const std::string& line) {
+    auto say = [&](const std::string& t) { con_.say(host_.scrub(t)); };
     std::istringstream in(line);
     std::string cmd;
     in >> cmd;
@@ -350,7 +409,7 @@ Action Harness::slash(const std::string& line) {
     rest = trim(rest);
 
     if (cmd == "/help") {
-        con_.say("commands:\n"
+        say("commands:\n"
                  "  /help               this\n"
                  "  /undo               roll back the last turn that changed anything\n"
                  "  /procs              the process table\n"
@@ -378,40 +437,40 @@ Action Harness::slash(const std::string& line) {
             skills.push_back("  " + e.path().stem().string() + "  " + first);
         }
         std::sort(skills.begin(), skills.end());
-        if (skills.empty()) con_.say("skills: none yet");
+        if (skills.empty()) say("skills: none yet");
         else {
             std::string s = "skills:";
             for (auto& k : skills) s += "\n" + k;
-            con_.say(s);
+            say(s);
         }
         return Action::Continue;
     }
     if (cmd == "/undo") {
-        if (undo_stack_.empty()) { con_.say("nothing to undo"); return Action::Continue; }
+        if (undo_stack_.empty()) { say("nothing to undo"); return Action::Continue; }
         int id = undo_stack_.back();
         undo_stack_.pop_back();
         std::string r = host_.call("snapshot", {{"rollback", std::to_string(id)}}).body;
         load_transcript();
-        con_.say(r.rfind("error", 0) == 0 ? r : "undone (" + r + ")");
+        say(r.rfind("error", 0) == 0 ? r : "undone (" + r + ")");
         return Action::Continue;
     }
     if (cmd == "/procs") {
         std::string p = slurp(host_.real("/state/procs"));
-        con_.say(p.empty() ? "no processes" : trim(p));
+        say(p.empty() ? "no processes" : trim(p));
         return Action::Continue;
     }
     if (cmd == "/log") {
-        if (rest.empty()) { con_.say("usage: /log <pid>"); return Action::Continue; }
+        if (rest.empty()) { say("usage: /log <pid>"); return Action::Continue; }
         std::string p = slurp(host_.real("/state/log/" + rest));
         size_t start = p.size() > 4096 ? p.size() - 4096 : 0;
-        con_.say(p.empty() ? "no log for " + rest : p.substr(start));
+        say(p.empty() ? "no log for " + rest : p.substr(start));
         return Action::Continue;
     }
     if (cmd == "/kill") {
-        if (rest.empty()) { con_.say("usage: /kill <pid>"); return Action::Continue; }
+        if (rest.empty()) { say("usage: /kill <pid>"); return Action::Continue; }
         std::string r = host_.call("wait", {{"pid", rest}, {"signal", "TERM"}, {"timeout_s", "5"}}).body;
         if (r.rfind("still running", 0) == 0) r = host_.call("wait", {{"pid", rest}, {"signal", "KILL"}}).body;
-        con_.say(first_line(r));
+        say(first_line(r));
         return Action::Continue;
     }
     if (cmd == "/skill") {
@@ -421,9 +480,9 @@ Action Harness::slash(const std::string& line) {
         std::string args;
         std::getline(rs, args);
         args = trim(args);
-        if (name.empty() || name.find('/') != std::string::npos) { con_.say("usage: /skill <name> [args]"); return Action::Continue; }
+        if (name.empty() || name.find('/') != std::string::npos) { say("usage: /skill <name> [args]"); return Action::Continue; }
         std::string body = slurp(host_.real("/generated/skills/" + name + ".md"));
-        if (body.empty()) { con_.say("no skill " + name + " (see /help)"); return Action::Continue; }
+        if (body.empty()) { say("no skill " + name + " (see /help)"); return Action::Continue; }
         std::string content = "[skill " + name + "]\n" + body;
         if (!args.empty()) content += "\nArguments: " + args;
         user_turn(content, line);
@@ -433,10 +492,10 @@ Action Harness::slash(const std::string& line) {
         save_transcript();
         std::string r = host_.call("snapshot", {}).body;
         ::sync();
-        con_.say("rebooting (" + r + ")");
+        say("rebooting (" + r + ")");
         return Action::Reboot;
     }
-    con_.say("unknown command " + cmd + " (see /help)");
+    say("unknown command " + cmd + " (see /help)");
     return Action::Continue;
 }
 

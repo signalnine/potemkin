@@ -4,6 +4,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <thread>
+#include <chrono>
+#include <stdexcept>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -310,6 +313,68 @@ TEST(too_long_prompt_drops_history_and_retries) { Env e; Host h(e.hc); FakeBacke
     auto& m = b.seen.back();
     bool has_q1 = false; for (auto& x : m) if (x.content == "q1") has_q1 = true;
     CHECK(!has_q1); CHECK(m.back().content == "q4"); }
+
+// ---- review round 2 ----
+TEST(undo_after_read_then_write_drops_the_request) { Env e; Host h(e.hc); FakeBackend b; CaptureConsole c; Harness H(b, h, c, e.cfg);
+    spit(e.root / "data/a", "x");
+    b.script = {text("hi"), calls({call("read", {{"path", "/data/a"}})}), calls({call("write", {{"path", "/generated/b"}, {"content", "2"}})}), text("done"), text("next")};
+    H.handle_line("hello"); H.handle_line("wipe the disk");
+    H.handle_line("/undo");
+    H.handle_line("again");
+    auto& m = b.seen.back();
+    for (auto& x : m) CHECK(x.content != "wipe the disk");
+    CHECK(m.back().content == "again"); CHECK(m.size() == 4); }
+struct ThrowingBackend : FakeBackend {
+    GenResult generate(const std::vector<Message>& m, StreamSink& s, const std::atomic<bool>& c) override {
+        if (seen.empty()) { seen.push_back(m); throw std::runtime_error("json type_error.302"); }
+        return FakeBackend::generate(m, s, c);
+    }
+};
+TEST(backend_exception_does_not_kill_harness) { Env e; Host h(e.hc); ThrowingBackend b; CaptureConsole c; Harness H(b, h, c, e.cfg);
+    b.script = {text("fine now")};
+    H.handle_line("one"); HAS(c.all, "type_error.302");
+    H.handle_line("two"); HAS(c.all, "fine now"); }
+TEST(error_after_rounds_keeps_turn_number) { Env e; Host h(e.hc); FakeBackend b; CaptureConsole c; Harness H(b, h, c, e.cfg);
+    GenResult boom; boom.end = "error"; boom.text = "api: down";
+    b.script = {calls({call("read", {{"path", "/data"}})}), boom, text("ok")};
+    H.handle_line("first"); H.handle_line("second");
+    auto log = slurp(e.root / "intent/log");
+    HAS(log, "turn=1 first"); HAS(log, "turn=2 second"); }
+TEST(context_errors_from_other_servers_shrink_history) {
+    for (const char* msg : {"api: HTTP 400: This model's maximum context length is 32768 tokens",
+                            "api: HTTP 400: the request exceeds the available context size",
+                            "api: HTTP 413: Request Entity Too Large"}) {
+        Env e; Host h(e.hc); FakeBackend b; CaptureConsole c; Harness H(b, h, c, e.cfg);
+        b.script = {text("a1"), text("a2"), text("a3")};
+        H.handle_line("q1"); H.handle_line("q2"); H.handle_line("q3");
+        GenResult big; big.end = "error"; big.text = msg;
+        b.script = {big, text("recovered")};
+        H.handle_line("q4"); HAS(c.all, "recovered");
+    } }
+TEST(shedding_mid_turn_keeps_the_request) { Env e; Host h(e.hc); FakeBackend b; CaptureConsole c; Harness H(b, h, c, e.cfg);
+    spit(e.root / "data/a", "x");
+    std::deque<GenResult> sc;
+    for (int i = 0; i < 6; ++i) sc.push_back(calls({call("read", {{"path", "/data/a"}})}));
+    GenResult big; big.end = "error"; big.text = "context_length_exceeded"; sc.push_back(big); sc.push_back(text("done"));
+    b.script = sc;
+    H.handle_line("the one long task");
+    auto& m = b.seen.back();
+    bool has = false; for (auto& x : m) if (x.content.find("the one long task") != std::string::npos) has = true;
+    CHECK(has); }
+TEST(slash_output_is_scrubbed) { Env e; e.hc.secrets = {"sk-secret-000000000"}; Host h(e.hc); FakeBackend b; CaptureConsole c; Harness H(b, h, c, e.cfg);
+    spit(e.root / "state/log/5", "token sk-secret-000000000 here\n"); spit(e.root / "state/procs", "5 background running turn=1 x sk-secret-000000000\n");
+    H.handle_line("/log 5"); H.handle_line("/procs"); LACKS(c.all, "sk-secret"); }
+
+TEST(ctrl_c_interrupts_a_running_tool) { Env e; Host h(e.hc); FakeBackend b; CaptureConsole c; Harness H(b, h, c, e.cfg);
+    fs::create_directories(e.root / "bin"); fs::create_symlink("/bin/sleep", e.root / "bin/sleep");
+    b.script = {calls({call("spawn", {{"exe", "/bin/sleep"}, {"argv", "30"}, {"timeout_s", "0"}}), call("write", {{"path", "/data/after"}, {"content", "x"}})}), text("never")};
+    std::thread t([&] { usleep(400000); H.cancel = true; });
+    auto t0 = std::chrono::steady_clock::now();
+    H.handle_line("go"); t.join();
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(5));
+    CHECK(!fs::exists(e.root / "data/after")); HAS(c.all, "interrupted"); CHECK(b.seen.size() == 1);
+    auto& m = H.messages(); CHECK(m.size() == 5); CHECK(m[3].role == "tool"); CHECK(m[4].role == "tool");
+    HAS(m[3].content, "interrupted"); HAS(m[4].content, "interrupted"); }
 
 // ---- frozen blocks ----
 TEST(tools_json_has_eight_in_order) {

@@ -5,7 +5,7 @@ secs = float(sys.argv[1]) if len(sys.argv) > 1 else 30
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(("", 1234))
-s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, struct.pack("4s4s", socket.inet_aton("230.0.0.1"), socket.inet_aton("0.0.0.0")))
+s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, struct.pack("4s4s", socket.inet_aton("230.0.0.1"), socket.inet_aton("127.0.0.1")))
 s.settimeout(1)
 tcp = collections.defaultdict(lambda: collections.Counter()); udp = collections.Counter()
 end = time.time() + secs

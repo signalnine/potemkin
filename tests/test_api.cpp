@@ -157,6 +157,37 @@ TEST(invalid_utf8_in_history_does_not_throw) { Fake f; f.streams = {{delta({{"co
     try { r = b->generate(m, s, no); } catch (...) { CHECK(!"threw"); }
     CHECK(r.end == "eos"); CHECK(f.bodies.size() == 1); }
 
+TEST(max_tokens_fits_the_window) { Fake f; f.streams = {{delta({{"content", "k"}}, "stop")}};
+    ApiOpts o = f.opts(); o.context = 4000; o.max_tokens = 32768;
+    auto b = make_api_backend(o); Sink s; std::atomic<bool> no{false};
+    auto m = convo(); m.push_back({"user", std::string(6000, 'x'), "", {}});
+    b->generate(m, s, no);
+    int mt = f.bodies[0]["max_tokens"]; CHECK(mt < 4000); CHECK(mt > 0); }
+TEST(failed_call_results_go_after_the_tool_messages) { Fake f; f.streams = {{delta({{"content", "k"}}, "stop")}};
+    auto b = make_api_backend(f.opts()); Sink s; std::atomic<bool> no{false};
+    auto m = convo();
+    Message a{"assistant", "", "", {}}; ToolCallRec bad; bad.ok = false; bad.raw = "<junk>";
+    ToolCallRec good; good.name = "read"; good.args = {{"path", "/a"}}; a.calls = {bad, good};
+    m.push_back(a); m.push_back({"tool", "error: could not parse", "", {}}); m.push_back({"tool", "contents", "", {}});
+    b->generate(m, s, no);
+    auto& ms = f.bodies[0]["messages"];
+    CHECK(ms.size() == 5); CHECK(ms[2]["tool_calls"].size() == 1);
+    CHECK(ms[3]["role"] == "tool"); CHECK(ms[3]["content"] == "contents");
+    CHECK(ms[4]["role"] == "user"); HAS(ms[4]["content"].get<std::string>(), "could not parse"); }
+TEST(error_inside_the_stream_is_an_error) { Fake f;
+    f.streams = {{delta({{"content", "par"}}), json{{"error", {{"message", "upstream overloaded"}}}}.dump()}};
+    auto b = make_api_backend(f.opts()); Sink s; std::atomic<bool> no{false};
+    auto r = b->generate(convo(), s, no); CHECK(r.end == "error"); HAS(r.text, "upstream overloaded"); }
+TEST(finish_reason_error_is_an_error) { Fake f; f.streams = {{delta({{"content", "x"}}, "error")}};
+    auto b = make_api_backend(f.opts()); Sink s; std::atomic<bool> no{false};
+    CHECK(b->generate(convo(), s, no).end == "error"); }
+TEST(malformed_chunk_fields_do_not_throw) { Fake f;
+    json tc = {{"index", nullptr}, {"id", "x"}, {"function", {{"name", "read"}, {"arguments", "{}"}}}};
+    f.streams = {{delta({{"tool_calls", {tc}}}), json{{"usage", {{"prompt_tokens", "lots"}}}}.dump(), delta({{"content", "ok"}}, "stop")}};
+    auto b = make_api_backend(f.opts()); Sink s; std::atomic<bool> no{false};
+    GenResult r; try { r = b->generate(convo(), s, no); } catch (...) { CHECK(!"threw"); }
+    HAS(r.text, "ok"); }
+
 int main(int argc, char** argv) {
     for (auto& [n, fn] : registry()) {
         if (argc > 1 && n.find(argv[1]) == std::string::npos) continue;
