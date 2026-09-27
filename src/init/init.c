@@ -425,6 +425,22 @@ int main(int argc, char** argv) {
     mkdir("/sys/fs/cgroup/potemkin", 0755);
     put("/sys/fs/cgroup/potemkin/cgroup.subtree_control", "+memory +pids");
 
+    // potemkin.hosts=name=addr[,name=addr]: static name resolution, e.g. the
+    // API host mapped to the uplink's single forwarded address.
+    const char* hosts = arg("potemkin.hosts", NULL);
+    if (hosts) {
+        mkdir("/etc", 0755);
+        FILE* hf = fopen("/etc/hosts", "w");
+        FILE* nf = fopen("/etc/nsswitch.conf", "w");
+        if (nf) { fputs("hosts: files dns\n", nf); fclose(nf); }
+        char buf[256];
+        snprintf(buf, sizeof buf, "%s", hosts);
+        for (char* e = strtok(buf, ","); e && hf; e = strtok(NULL, ",")) {
+            char* eq = strchr(e, '=');
+            if (eq) { *eq = 0; fprintf(hf, "%s %s\n", eq + 1, e); }
+        }
+        if (hf) fclose(hf);
+    }
     const char* host = arg("potemkin.hostname", NULL);
     if (host) {
         if (sethostname(host, strlen(host)) != 0) say("init: hostname: %s\n", strerror(errno));

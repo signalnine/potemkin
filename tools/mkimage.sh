@@ -7,7 +7,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 flavor=${1:-api}
-ARCH=${ARCH:-86}
+# Which q27-init goes in: build/q27-init-$INIT, one of api (tools/build.sh
+# api, no CUDA) or 12g/w8/full (tools/build.sh init with that PROFILE).
+# api images default to api, cuda images to 12g.
+INIT=${INIT:-$([[ $flavor == api ]] && echo api || echo 12g)}
 out=build/image-$flavor
 stage=$out/root
 rm -rf "$out"
@@ -16,7 +19,8 @@ mkdir -p "$stage"/{sbin,usr/bin,usr/lib,lib64,lib/x86_64-linux-gnu,etc/ssl/certs
 install -m 0755 build/init "$stage/sbin/init"
 ln "$stage/sbin/init" "$stage/sbin/rescue"
 ln -s sbin/init "$stage/init"  # the kernel runs /init from an initramfs
-install -m 0755 "build/q27-init-sm$ARCH" "$stage/usr/bin/q27-init"  # ARCH=86 (12g) or full
+[[ -f build/q27-init-$INIT ]] || { echo "mkimage.sh: build/q27-init-$INIT missing (tools/build.sh api|init)" >&2; exit 1; }
+install -m 0755 "build/q27-init-$INIT" "$stage/usr/bin/q27-init"
 strip "$stage/usr/bin/q27-init" "$stage/sbin/init" 2>/dev/null || true
 
 # glibc: what q27-init, tcc and libcuda load (docs/link-audit.md).

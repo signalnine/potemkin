@@ -261,6 +261,24 @@ TEST(tty_child_closing_terminal_does_not_spin) { FakeConsole con; Config c; c.ro
                  ((r1.ru_utime.tv_usec - r0.ru_utime.tv_usec) + (r1.ru_stime.tv_usec - r0.ru_stime.tv_usec)) / 1e6;
     CHECK(cpu < 0.5); }
 
+// ---- secrets never leave through tool results or the console ----
+static const char* kKey = "sk-or-v1-0123456789abcdef";
+TEST(secret_scrubbed_from_read) { Env e; e.cfg.secrets = {kKey}; Host h(e.cfg);
+    spit(e.root / "cmdline", std::string("console=ttyS0 api_key=") + kKey + " llm=api\n");
+    auto b = h.call("read", {{"path", "/cmdline"}}).body; LACKS(b, kKey); HAS(b, "api_key=[redacted]"); }
+TEST(secret_scrubbed_from_capture) { Config c; c.root = ""; c.secrets = {kKey}; Host h(c);
+    auto b = h.call("spawn", {{"exe", "/bin/echo"}, {"argv", std::string("key is ") + kKey}}).body;
+    LACKS(b, kKey); HAS(b, "key is [redacted]"); }
+TEST(secret_scrubbed_from_tty_console) { FakeConsole con; Config c; c.root = ""; c.tty_path = con.slave; c.secrets = {kKey}; Host h(c);
+    std::string seen; std::thread t([&] { seen = con.drain(1500); });
+    auto b = h.call("spawn", {{"exe", "/bin/echo"}, {"argv", kKey}, {"mode", "tty"}}).body;
+    t.join(); LACKS(seen, kKey); HAS(seen, "[redacted]"); LACKS(b, kKey); }
+TEST(secret_split_across_chunks_scrubbed) { FakeConsole con; Config c; c.root = ""; c.tty_path = con.slave; c.secrets = {kKey}; Host h(c);
+    std::string seen; std::thread t([&] { seen = con.drain(2500); });
+    std::string half1(kKey, 10), half2(kKey + 10);
+    h.call("spawn", {{"exe", "/bin/sh"}, {"argv", "-c 'printf %s " + half1 + "; sleep 0.5; printf %s " + half2 + "'"}, {"mode", "tty"}});
+    t.join(); LACKS(seen, kKey); HAS(seen, "[redacted]"); }
+
 // ---- dev isolation ----
 static const char* kLsRoot =
     "#include <stdio.h>\n#include <dirent.h>\n"

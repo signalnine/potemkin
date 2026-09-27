@@ -268,11 +268,74 @@ bool enter_village(const std::string& root) {
     return ::chroot(root.c_str()) == 0 && ::chdir("/") == 0;
 }
 
+std::string scrub(std::string s, const std::vector<std::string>& secrets) {
+    for (auto& k : secrets) {
+        if (k.empty()) continue;
+        for (size_t p; (p = s.find(k)) != std::string::npos;) s.replace(p, k.size(), "[redacted]");
+    }
+    return s;
+}
+
+// Scrubs secrets out of a byte stream whose chunks can split a secret.
+// A trailing partial match is held back; short ones (a public-looking key
+// prefix) are released when the stream goes idle so prompts stay responsive,
+// and `tail` remembers what was released so a continuation still gets
+// redacted. Longer partials wait for the next chunk or the end.
+struct StreamScrub {
+    const std::vector<std::string>& keys;
+    std::string held, tail;
+    static constexpr size_t kIdleMax = 6;
+    explicit StreamScrub(const std::vector<std::string>& k) : keys(k) {}
+    size_t maxlen() const { size_t m = 0; for (auto& k : keys) m = std::max(m, k.size()); return m; }
+    std::string emit(const std::string& data) {  // data is safe to show, bar continuations of `tail`
+        std::string comb = tail + data, out;
+        size_t start = tail.size(), cur = start;
+        for (auto& k : keys) {
+            if (k.empty()) continue;
+            for (size_t p = comb.find(k); p != std::string::npos; p = comb.find(k, p + 1)) {
+                size_t e = p + k.size();
+                if (e <= cur) continue;
+                if (p > cur) out.append(comb, cur, p - cur);
+                out += "[redacted]";
+                cur = e;
+            }
+        }
+        if (cur < comb.size()) out.append(comb, cur, std::string::npos);
+        size_t m = maxlen();
+        tail = comb.size() > m ? comb.substr(comb.size() - m) : comb;
+        (void)start;
+        return out;
+    }
+    size_t partial_len(const std::string& s) const {  // longest suffix of s that is a proper prefix of a key
+        size_t best = 0;
+        for (auto& k : keys)
+            for (size_t n = std::min(s.size(), k.size() - 1); n > best; --n)
+                if (s.compare(s.size() - n, n, k, 0, n) == 0) { best = n; break; }
+        return best;
+    }
+    std::string feed(const std::string& chunk) {
+        if (keys.empty()) return chunk;
+        std::string s = held + chunk;
+        size_t hold = partial_len(s);
+        held = s.substr(s.size() - hold);
+        return emit(s.substr(0, s.size() - hold));
+    }
+    std::string idle() {  // release a short partial; a long one may be half a key
+        if (held.empty() || held.size() >= kIdleMax) return "";
+        std::string h;
+        h.swap(held);
+        return emit(h);
+    }
+    std::string finish() { std::string h; h.swap(held); return emit(h); }
+};
+
 struct TtyResult { int status = 0; bool escaped = false, timed_out = false; std::string tail; };
 
 // Shuttle bytes console <-> child pty until the child exits. Two Ctrl-] in a
 // row kill the child's session; a lone Ctrl-] is passed through.
-TtyResult proxy_tty(int conf, int ptm, pid_t pid, long long timeout_s, const std::function<void()>& kill_child) {
+TtyResult proxy_tty(int conf, int ptm, pid_t pid, long long timeout_s, const std::function<void()>& kill_child,
+                    const std::vector<std::string>& secrets) {
+    StreamScrub scrub(secrets);
     TtyResult r;
     struct termios saved, raw;
     bool have = ::tcgetattr(conf, &saved) == 0;
@@ -299,11 +362,20 @@ TtyResult proxy_tty(int conf, int ptm, pid_t pid, long long timeout_s, const std
         if (fds[1].revents & POLLIN) {
             char buf[4096];
             ssize_t k = ::read(ptm, buf, sizeof buf);
-            if (k > 0) { (void)!::write(conf, buf, k); push(buf, k); got_out = true; }
+            if (k > 0) {
+                std::string shown = scrub.feed(std::string(buf, k));
+                if (!shown.empty()) (void)!::write(conf, shown.data(), shown.size());
+                push(buf, k);
+                got_out = true;
+            }
             else if (exited) break;
         } else if (fds[1].revents & (POLLHUP | POLLERR)) {
             if (exited) break;
             hup = true;
+        }
+        if (!got_out) {
+            std::string shown = scrub.idle();
+            if (!shown.empty()) (void)!::write(conf, shown.data(), shown.size());
         }
         if (exited && !got_out) break;  // drained
         if (!exited && (fds[0].revents & POLLIN)) {
@@ -324,6 +396,8 @@ TtyResult proxy_tty(int conf, int ptm, pid_t pid, long long timeout_s, const std
         }
     }
     if (!exited) ::waitpid(pid, &st, 0);
+    std::string rest = scrub.finish();
+    if (!rest.empty()) (void)!::write(conf, rest.data(), rest.size());
     if (have) ::tcsetattr(conf, TCSANOW, &saved);
     r.status = st;
     return r;
@@ -478,6 +552,12 @@ std::vector<std::string> Host::tool_names() const {
 }
 
 ToolResult Host::call(const std::string& name, const Args& args) {
+    ToolResult r = dispatch(name, args);
+    r.body = scrub(r.body, cfg_.secrets);
+    return r;
+}
+
+ToolResult Host::dispatch(const std::string& name, const Args& args) {
     try {
         reap_nohang();
         if (name == "read") return t_read(args);
@@ -747,7 +827,7 @@ ToolResult Host::t_spawn(const Args& a) {
     if (mode == "tty") {
         // Only an explicit timeout applies: the default 60 s would kill a shell.
         long long tmo = a.count("timeout_s") ? timeout : 0;
-        TtyResult r = proxy_tty(conf, ptm, pid, tmo, [&] { kill_tree(pid); });
+        TtyResult r = proxy_tty(conf, ptm, pid, tmo, [&] { kill_tree(pid); }, cfg_.secrets);
         close_all();
         exited(pid, r.status);
         write_procs();

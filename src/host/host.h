@@ -30,6 +30,9 @@ struct Config {
     // netboot: url -> body; set err on failure. Kept out of the host library
     // so it needs no HTTP or TLS code.
     std::function<std::string(const std::string& url, std::string& err)> fetcher;
+    // Values that must never appear in a tool result or on the console (the
+    // api_key the kernel cmdline carries). Replaced with "[redacted]".
+    std::vector<std::string> secrets;
 };
 
 struct Proc {
@@ -51,6 +54,7 @@ public:
     std::string resolve(const std::string& model_path) const;  // real(), following symlinks inside root
 
 private:
+    ToolResult dispatch(const std::string& name, const Args& args);
     ToolResult t_read(const Args&);
     ToolResult t_write(const Args&);
     ToolResult t_stat(const Args&);

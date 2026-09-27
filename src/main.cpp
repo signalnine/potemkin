@@ -168,6 +168,9 @@ int main(int argc, char** argv) {
              m + "/crt1.o", m + "/crti.o", "@SRC@", m + "/libc.a", t + "/libtcc1.a", m + "/crtn.o"};
     hc.model_name = llm == "api" ? ao.model : qo.model.substr(qo.model.rfind('/') + 1);
     hc.netboot = llm == "api";
+    // The key rides on the kernel cmdline (by design), so the model can read
+    // it from /proc/cmdline or dmesg. It never leaves in a tool result.
+    if (ao.key.size() >= 8) hc.secrets.push_back(ao.key);
     if (hc.netboot) {
         std::string ca = ao.ca_file;
         hc.fetcher = [ca](const std::string& url, std::string& err) { return pk::http_fetch(url, err, ca); };

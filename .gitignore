@@ -2,3 +2,7 @@
 *.db
 build/
 third_party/debs/
+tools/__pycache__/
+*.pyc
+.bd/backup/
+.bd/embeddeddolt/.lock

@@ -1,8 +1,21 @@
 # Boot PotemkinOS in qemu with the serial port as the console.
 # Run with: bash tools/run-vm.sh [api|cuda] [extra kernel args...]
-# llm=api defaults to a q27-server on the host (10.0.2.2 is the host's
-# loopback under user networking). Pass api_url=/api_model=/api_key= to point
-# it elsewhere; api_key on the cmdline is the design, but prefer a local server.
+#
+# llm=api settings, all from the environment:
+#   API_URL    OpenAI-compatible base URL as seen from THIS machine
+#              (default http://127.0.0.1:8090/v1, a q27-server on the host;
+#              e.g. https://openrouter.ai/api/v1)
+#   API_MODEL  model name the endpoint expects (e.g. qwen/qwen3.6-27b)
+#   API_KEY    bearer token; it goes on the kernel cmdline, which is the joke.
+#              The harness scrubs it from everything the model sees, and the
+#              boot is made quiet so the kernel does not print it either.
+#
+# The VM's uplink reaches the API endpoint and nothing else: no internet, no
+# DNS, no services on this machine's loopback (an unattended village will
+# scan them). NET_OPEN=1 gives it the ordinary QEMU user network instead.
+#
+# NODE=N boots village N of an oblast: its own disk and hostname, plus a second
+# NIC on a private LAN (10.10.0.1N) shared with the other villages.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 flavor=${1:-api}
@@ -10,30 +23,52 @@ shift || true
 Q=build/qemu
 KERNEL=${KERNEL:-$(ls build/kernel/boot/vmlinuz-* | head -1)}
 append="console=ttyS0 potemkin.tty=/dev/ttyS0 potemkin.net=${NET:-10.0.2.15/24,10.0.2.2,10.0.2.3} llm=$flavor"
-if [[ $flavor == api ]]; then
-  append+=" api_url=${API_URL:-http://10.0.2.2:8090/v1} api_model=${API_MODEL:-bonsai2-27b-t3-slim}"
-fi
-disk=build/disk-$flavor.img
-extra=()
+
 uplink="user,id=n0"
-# NODE=N: one of several villages. Own disk and hostname, plus a second NIC on
-# a private segment (10.10.0.1N) shared with the other nodes over UDP
-# multicast, which needs no root.
+if [[ $flavor == api ]]; then
+  url=${API_URL:-http://127.0.0.1:8090/v1}
+  scheme=${url%%://*}
+  rest=${url#*://}
+  hostport=${rest%%/*}
+  path=${rest#"$hostport"}
+  host=${hostport%:*}
+  port=${hostport##*:}
+  [[ $hostport == *:* ]] || port=$([[ $scheme == https ]] && echo 443 || echo 80)
+  local_api=0
+  [[ $host == 127.0.0.1 || $host == localhost ]] && local_api=1
+  if [[ -n ${NET_OPEN:-} ]]; then
+    # 10.0.2.2 is this machine's loopback under QEMU user networking.
+    (( local_api )) && host=10.0.2.2
+    guest_url="$scheme://$host:$port$path"
+  else
+    # One forwarded endpoint; cmd: runs a relay per connection (tcp: would
+    # connect once, at startup). A remote host keeps its name inside the VM,
+    # mapped to the forward address, so TLS still checks the real certificate.
+    target=$host
+    (( local_api )) && target=127.0.0.1
+    uplink="user,id=n0,restrict=on,guestfwd=tcp:10.0.2.100:$port-cmd:nc $target $port"
+    if (( local_api )); then
+      guest_url="$scheme://10.0.2.100:$port$path"
+    else
+      guest_url="$scheme://$host:$port$path"
+      append+=" potemkin.hosts=$host=10.0.2.100"
+    fi
+  fi
+  append+=" api_url=$guest_url api_model=${API_MODEL:-local}"
+  if [[ -n ${API_KEY:-} ]]; then
+    append+=" api_key=$API_KEY quiet"
+  fi
+fi
+
+disk=build/disk-$flavor.img
 if [[ -n ${NODE:-} ]]; then
   disk=build/disk-$flavor-node$NODE.img
   [[ -f $disk ]] || cp --sparse=always build/disk-$flavor.img "$disk"
-  # Unattended villages get no route to the host's loopback services or the
-  # internet: restrict=on, plus one forwarded port for the model API.
-  # NET_OPEN=1 lifts this (and exposes everything on the host's 127.0.0.1).
-  if [[ -z ${NET_OPEN:-} ]]; then
-    uplink="user,id=n0,restrict=on,guestfwd=tcp:10.0.2.100:8090-cmd:nc 127.0.0.1 ${API_PORT:-8090}"  # cmd: runs one relay per connection; tcp: would connect once
-    append=${append//api_url=http:\/\/10.0.2.2:8090/api_url=http:\/\/10.0.2.100:8090}
-  fi
   append+=" potemkin.hostname=node$NODE potemkin.net2=10.10.0.1$NODE/24"
-  extra=(-device virtio-net-pci,netdev=n0,mac=52:54:00:00:00:1$NODE
-         -netdev socket,id=n1,mcast=230.0.0.1:1234 -device virtio-net-pci,netdev=n1,mac=52:54:00:10:00:1$NODE)
+  nics=(-device virtio-net-pci,netdev=n0,mac=52:54:00:00:00:1$NODE
+        -netdev socket,id=n1,mcast=230.0.0.1:1234 -device virtio-net-pci,netdev=n1,mac=52:54:00:10:00:1$NODE)
 else
-  extra=(-device virtio-net-pci,netdev=n0)
+  nics=(-device virtio-net-pci,netdev=n0)
 fi
 append+=" $*"
 exec env LD_LIBRARY_PATH=$Q/usr/lib/x86_64-linux-gnu "$Q/usr/bin/qemu-system-x86_64" \
@@ -41,5 +76,5 @@ exec env LD_LIBRARY_PATH=$Q/usr/lib/x86_64-linux-gnu "$Q/usr/bin/qemu-system-x86
   -enable-kvm -cpu host -m ${MEM:-4G} -smp 4 \
   -kernel "$KERNEL" -initrd "build/image-$flavor/initramfs.gz" -append "$append" \
   -drive file=$disk,if=virtio,format=raw \
-  -netdev "$uplink" "${extra[@]}" \
+  -netdev "$uplink" "${nics[@]}" \
   -nographic -no-reboot
