@@ -334,6 +334,18 @@ TEST(isolated_child_sees_village) { Env e; e.cfg.isolate = true; Host h(e.cfg);
     HAS(c, "exit=0");
     auto b = h.call("spawn", {{"exe", "/generated/bin/lsroot"}}).body;
     HAS(b, "exit=0"); HAS(b, "[generated]"); HAS(b, "[store]"); LACKS(b, "[usr]"); HAS(b, "proc-ok"); HAS(b, "uid=0"); }
+TEST(isolated_child_sees_mounts) { Env e; e.cfg.isolate = true;
+    fs::path side = e.root.string() + "-side";
+    fs::create_directories(side); std::ofstream(side / "marker") << "from-the-sysroot";
+    e.cfg.mounts = {{"/usr/lib/potemkin", side.string()}};
+    Host h(e.cfg);
+    auto c = h.call("compile", {{"lang", "c"}, {"name", "catm"}, {"source",
+        "#include <stdio.h>\nint main(void){ FILE *f = fopen(\"/usr/lib/potemkin/marker\", \"r\"); char b[64] = {0};\n"
+        "  if (!f) { printf(\"missing\\n\"); return 1; } fgets(b, sizeof b, f); printf(\"%s\\n\", b); return 0; }\n"}}).body;
+    HAS(c, "exit=0");
+    auto b = h.call("spawn", {{"exe", "/generated/bin/catm"}}).body;
+    HAS(b, "exit=0"); HAS(b, "from-the-sysroot");
+    fs::remove_all(side); }
 TEST(isolated_background_logs) { Env e; e.cfg.isolate = true; Host h(e.cfg);
     h.call("compile", {{"lang", "c"}, {"name", "lsroot"}, {"source", std::string("#include <unistd.h>\n") + kLsRoot}});
     auto b = h.call("spawn", {{"exe", "/generated/bin/lsroot"}, {"mode", "background"}}).body;

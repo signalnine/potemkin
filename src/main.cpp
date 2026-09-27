@@ -178,6 +178,11 @@ int main(int argc, char** argv) {
     }
     hc.isolate = !root.empty();  // dev: programs see the village as /, like the image
     if (!root.empty() && sysroot != "/usr/lib/potemkin") hc.mounts = {{"/usr/lib/potemkin", sysroot}};
+    // The image ships glibc (tcc and libcuda load it); the dev village borrows
+    // the host's, read-only to an unprivileged user.
+    if (!root.empty())
+        for (const char* d : {"/lib64", "/lib/x86_64-linux-gnu"})
+            if (access(d, F_OK) == 0) hc.mounts.push_back({d, d});
 
     con.say("loading " + hc.model_name + " ...");
     std::unique_ptr<pk::Backend> be;

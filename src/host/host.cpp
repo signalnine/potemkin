@@ -257,8 +257,9 @@ std::string strip_ansi(const std::string& s) {
 
 // Dev mode only: put this (child) process inside the village. A user namespace
 // makes it root there without being root here; a mount namespace lets it see
-// the kernel's /proc, /sys and /dev; chroot does the rest.
-bool enter_village(const std::string& root) {
+// the kernel's /proc, /sys and /dev, plus the Config::mounts the tools
+// already resolve through (the sysroot at /usr/lib/potemkin); chroot does the rest.
+bool enter_village(const std::string& root, const std::vector<std::pair<std::string, std::string>>& mounts) {
     uid_t uid = ::getuid();
     gid_t gid = ::getgid();
     if (::unshare(CLONE_NEWUSER | CLONE_NEWNS) != 0) return false;
@@ -275,6 +276,8 @@ bool enter_village(const std::string& root) {
     ::mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr);
     for (const char* k : {"/proc", "/sys", "/dev"})
         if (::mount(k, (root + k).c_str(), nullptr, MS_BIND | MS_REC, nullptr) != 0) return false;
+    for (auto& [at, from] : mounts)
+        if (::mount(from.c_str(), (root + at).c_str(), nullptr, MS_BIND | MS_REC, nullptr) != 0) return false;
     return ::chroot(root.c_str()) == 0 && ::chdir("/") == 0;
 }
 
@@ -499,8 +502,10 @@ std::vector<std::string> split_argv(const std::string& s) {
 
 Host::Host(Config c) : cfg_(std::move(c)) {
     std::error_code ec;
-    if (cfg_.isolate && !cfg_.root.empty())
+    if (cfg_.isolate && !cfg_.root.empty()) {
         for (const char* k : {"/proc", "/sys", "/dev"}) fs::create_directories(cfg_.root + k, ec);
+        for (auto& m : cfg_.mounts) fs::create_directories(cfg_.root + m.first, ec);
+    }
     // Children of a previous q27-init are nobody's now: kill them.
     if (!cfg_.cgroup_root.empty()) {
         bool any = false;
@@ -821,7 +826,7 @@ ToolResult Host::t_spawn(const Args& a) {
             if (sfd > 2) ::close(sfd);
         }
         if (cfg_.isolate && !cfg_.root.empty()) {
-            if (!enter_village(cfg_.root)) {
+            if (!enter_village(cfg_.root, cfg_.mounts)) {
                 int e = errno;
                 (void)!::write(execpipe[1], &e, sizeof e);
                 ::_exit(127);
