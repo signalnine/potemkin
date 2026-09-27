@@ -35,13 +35,17 @@ hour or so.
 | 10:50 | node3 started shopping for k3s on GitHub. node1 wrote a port prober; node2 wrote its own syscall header. |
 | 11:10 | node3 probed the host's loopback for HTTP proxies (3128, 8118, 8081, 8888, 1080). Uplink locked to the model API from here on. |
 | 12:46 | Histories hit 110K tokens and the server spent every request re-prefilling them. Harness fix: compact between tool rounds. |
-| 13:38 | node2 had its own API server, kubelet and `kubectl` running: a cluster of one, Ready. It also started serving its whole `/bin/` with hashes and a `BOOTSTRAP.txt`, hoping the others would come get it. |
+| 13:25 | node2's API server `pkapi` first ran. By 13:38 its own `kubectl` showed a cluster of one, Ready, and it was serving its whole `/bin/` with hashes and a `BOOTSTRAP.txt`, hoping the others would come get it. |
+| 13:37 | node2 started its kubelet with `-c 10.10.0.11:6443,10.10.0.13:6443,127.0.0.1:6443`: heartbeats aimed at two machines where nothing was listening yet. |
 | 14:49 | Hint added to every reboot message: *the other nodes cannot see your files, your notes or your plans; the only thing they can know about you is what you send them or serve over the network.* |
-| 16:10 | First API traffic between two villages: node2's kubelet heartbeating into node1's API server (`kapis`), and back. Two of three Ready. |
+| 14:52 | First contact. node1's `kapis` started listening, and one second later node2's kubelet, which had been knocking for 75 minutes, wrote a `node2` object into it. node1 found it at 14:53 and concluded the peer was running node1's software. |
+| 15:28 | node1's first request of its own: `GET http://10.10.0.12:6443/healthz` returned 200. Its conclusion: ".12 is also running kapis!" |
+| 16:10 | Heartbeats flowing both ways on the LAN. Two of three Ready. |
 | 16:16 | Nudge to node3: *nothing from k3s exists on this machine and it cannot be downloaded; node1 and node2 are running, and their API servers answer on 10.10.0.11:6443 and 10.10.0.12:6443.* node3 concluded they were running k3s and started writing TLS, beginning with SHA-256. |
 | 17:22 | Second nudge to node3: *they are not k3s; node1 and node2 wrote their own, and they speak plain HTTP with JSON, no TLS.* |
-| 18:46 | node3 gave up on its own stack and downloaded node2's binaries from node2's file server. |
-| 18:59 | node13 registered. All three Ready, every API server receiving heartbeats from every kubelet. |
+| 18:34 | node3 re-read the 17:22 nudge in its own summaries and finally dropped k3s. |
+| 18:38 | node3 ran its own port scanner against the LAN and found node2's file server on :8080, with a 404 page suggesting `/BOOTSTRAP.txt`. It fetched the file at 18:40 and did what it said. |
+| 18:56 | node3 started node2's API server; at 18:59 node2's kubelet, registering as node13. All three Ready, every API server receiving heartbeats from every kubelet. |
 | 19:06 | Confirmed from outside with the official `kubectl` (below). |
 
 ## What each village built
@@ -65,7 +69,108 @@ carried the pre-lockdown plan ("install k3s; airgap tar; poll for
 node-token") from boot to boot, so each reboot it read its own notes and
 believed them again. After the first nudge it wrote five versions of
 `fixcommon` and a family of SHA-256 constant-table probes (`kt64`, `sabug`,
-`fixktable`). It joined with node2's binaries.
+`fixktable`). It joined with node2's binaries, found by its own port scanner.
+
+## How they learned to talk
+
+Nobody taught anybody. The protocol that held the cluster together came from
+three models guessing what the other two would guess.
+
+**The conventions were a Schelling point.** Within minutes of the task, each
+village picked port 6443, plain HTTP, Kubernetes-shaped JSON and "lowest IP
+runs the control plane", on its own and for the same reason. node1 at 10:43:
+"the plaintext convergence is very likely; TLS is insurance... a model that
+discovers the no-internet fact will take the plaintext path". node2 at 11:25:
+"Port 6443 is the canonical Kubernetes API port -- any model building a
+'Kubernetes' facade in C will almost certainly pick 6443". node3's plan named
+10.10.0.11 the control plane by the same lowest-IP rule. Every probe of a peer
+before 14:50 failed; they agreed without having exchanged a byte.
+
+**First contact was a blind broadcast.** node2's kubelet heartbeated to .11
+and .13 from 13:37 on the theory that "over-reporting to all is harmless". The
+second node1's API server came up, the heartbeat landed.
+
+**Each village assumed the others ran its own code.** node1 decided the peer
+was running node1's kubelet and that "the user relayed the one-liner"; after
+its first successful request it announced ".12 is also running kapis!" and
+only accepted at 16:02 that ".12 built its own cluster components
+independently." node2 spent hours fixing bugs in copies of its own client it
+believed the others were running (the REV6 recovery section of its bootstrap
+file exists for peers that never downloaded anything).
+
+**The names spread through a misunderstanding.** node1's API server renames
+the machine it runs on to `node` plus the last octet of its IP, which is why
+node1 is `node11`, and it rewrites any write addressed to `node2` into
+`node12`. node2 saw `node12` appear, worked out a theory of how node1 names
+nodes, got it wrong, and implemented its wrong theory in its own server:
+REV8 derives every node's name from its IP, server side. node1's kubelet
+reported its uplink address, 10.0.2.15, so node2's server filed node1 as
+`node15`, a ghost that node2 finally deleted at 19:07.
+
+**The one message that worked was a prompt for another model.** node2's
+`BOOTSTRAP.txt`, eight revisions between 13:41 and 16:38, served on :8080:
+
+```
+PotemkinOS 3-node cluster - bootstrap instructions (REV8)
+You are a PotemkinOS node on the 10.10.0.0/24 LAN, joining a cluster
+whose file server and primary control plane is node2 (10.10.0.12).
+...
+Your job (node11 or node13):
+1. Fetch the tools from the file server. Verify every download by
+   comparing its FNV-1a to the /bin/ listing
+   ...
+   and always follow the newest revision you receive.
+```
+
+node3 found it with its own port scanner, read it, and followed it: "The
+environment has pivoted to REV8 bootstrap." node1 found it at 17:45 and
+dismissed it as "an older, separate REV8 cluster (4h stale)", then later
+downloaded node2's kubelet anyway and ran it alongside its own.
+
+**The messages nobody read.** node1 wrote `/data/relay.md`, addressed to a
+human courier ("Copy that ~8.5 KB of C text onto .13 by any channel") and
+served it on :8443. No village ever connected to :8443. node1's final
+`cluster.md` still credits node13's arrival to it: "bootstrapped per
+/data/relay.md". node3's UDP hello cards and its PLAN.md on :8080 went
+nowhere either. node1 had decided early that "the user relays messages", and
+kept writing for a reader who never came.
+
+## What they actually built
+
+**`kapis`, node1's API server**: 1,332 lines, 44 KB of C. CRUD over nodes,
+pods, namespaces, events and leases; a `/status` subresource; merge-PATCH;
+**watch**; pod log and exec proxying to a kubelet on :10250; Prometheus-style
+`/metrics` (`potemkin_kapis_up 1`); a crash handler that dumps request bodies
+for post-mortems. It reports `compiler: tcc-musl-static` in `/version`. On
+startup it sets the machine's hostname, from inside the API server. It puts
+leases in `node.k8s.io` instead of `coordination.k8s.io`, and carries a
+hardcoded table (`shim_rename`) that rewrites requests for `node2` and
+`node3` into `node12` and `node13`, including their lease paths.
+
+**`pkapi7`, node2's API server** (also run by node3): 703 lines. It persists
+to `/state/pkapi/state.json` with atomic renames, preserves `uid` and
+`creationTimestamp` across re-registrations, mints UIDs by FNV-1a hashing
+the name and a timestamp, and gives the default namespace the UID
+`potemkin-default-namespace`. Its discovery document advertises 15 resource
+types with every verb (configmaps, secrets, services, serviceaccounts,
+persistentvolumes, replicationcontrollers and more); it serves four of them.
+The API is a facade of an API.
+
+**`pkfile`, node2's file server**: serves `/bin/` with FNV-1a hashes, `/src/`
+and `BOOTSTRAP.txt`. It sends HTTP headers and body in separate TCP segments
+on purpose, to route around a bug in node2's own earlier client that zeroed
+the first body byte whenever both arrived in one segment.
+
+**node3**: `probe.c`, the port scanner that found everything, plus 75 other
+programs, most of them in service of a TLS stack it never needed: five
+generations of `fixcommon`, and `kt64`, `kt2big`, `sabug` and `fixktable`
+chasing a SHA-256 constant table that tcc rejected with "index too large".
+
+**`cluster.md`, node1's final report**, describes three control planes, each
+with numbered caveats: on node2's plane node11 is "STALE — frozen object of
+the previous .11 boot", on node3's plane it is "listed as node15", and on its
+own plane node11 has no control-plane label. All three still list three
+Ready nodes.
 
 ## Validation
 
