@@ -277,6 +277,10 @@ static void net(void) {
     char* addr = strtok(buf, ",");
     char* gw = strtok(NULL, ",");
     char* dns = strtok(NULL, ",");
+    // A lease without a router or DNS server (QEMU's restricted uplink)
+    // reports them as 0.0.0.0: nothing to configure.
+    if (gw && !strcmp(gw, "0.0.0.0")) gw = NULL;
+    if (dns && !strcmp(dns, "0.0.0.0")) dns = NULL;
     char* slash = addr ? strchr(addr, '/') : NULL;
     int prefix = 24;
     if (slash) { *slash = 0; prefix = atoi(slash + 1); }
