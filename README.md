@@ -34,12 +34,18 @@ endpoint, and the model writes, compiles and runs C inside
 the VM as root. State survives a hard kill. On a workstation `q27-init` runs
 the same loop against local GPUs:
 
-| Where | Model | tok/s |
-| --- | --- | --: |
-| RTX 5090 | Qwen3.8-27B default tier + DFlash2 Q8, 262K window | 312-365 |
-| RTX 3090 | Qwen3.8-27B q4s + DFlash2 Q8, W_MAX=8 build | 162-169 |
-| RTX 3090 | Bonsai 2 27B T3 + MTP heads, 12g build | 104-148 |
-| RTX 3090 | Bonsai 2 27B T3, 12g build | 55-79 |
+| Where | Model | Session tok/s | Per turn | Session |
+| --- | --- | --: | --: | --: |
+| RTX 5090 | Qwen3.8-27B default tier + DFlash2 Q8, 262K window | 184 | 146-425 | 153K tokens, to 124K context |
+| RTX 3090 | Qwen3.8-27B q4s + DFlash2 Q8, W_MAX=8 build | 94 | 63-137 | 62K tokens, to 66K context |
+| RTX 3090 | Bonsai 2 27B T3 + MTP heads, 12g build | 95 | 70-97 | 11K tokens, to 12K context |
+| RTX 3090 | Bonsai 2 27B T3, 12g build | 48 | 35-67 | 63K tokens, to 67K context |
+
+Session is total tokens over total decode time for a whole shell-building
+session. Speculative decoding makes single turns swing: short tool-call turns
+in a small window land most of each draft and run at the top of the range,
+long reasoning turns deep into the context run at the bottom. Quote the
+session number.
 
 Asked for a shell, Qwen plans for six minutes, writes `sh` plus the `ls`,
 `cat` and `rm` it needs, fixes the shell three times and hands you the
