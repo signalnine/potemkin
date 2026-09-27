@@ -60,7 +60,10 @@ echo "contents:"
 ( cd "$stage" && find . -type f -o -type l | grep -v '^./usr/lib/potemkin/' | sort | sed 's/^\./  /' )
 echo "  /usr/lib/potemkin/... ($(find "$stage/usr/lib/potemkin" -type f | wc -l) files: tcc + musl)"
 
-# Persistent disk: the trees that survive reboots. Created once, kept after.
+# Persistent disk for the VM (run-vm.sh): the trees that survive reboots.
+# Created once, kept after. A cuda image boots on bare metal and uses a real
+# partition (potemkin.disk=), so it gets none.
+[[ $flavor == cuda ]] && { echo "disk: none (bare metal uses potemkin.disk=)"; exit 0; }
 disk=build/disk-$flavor.img
 if [[ ! -f $disk ]]; then
   mkdir -p "$out/disk"/{data,state,generated/bin,store,intent,cache,snapshots,models}
