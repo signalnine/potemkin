@@ -135,11 +135,13 @@ int main(int argc, char** argv) {
         // Image defaults: model=qwen|bonsai picks the weights on the persistent disk.
         std::string which = kc.count("model") ? kc["model"] : "bonsai";
         // Unbounded, Bonsai plans a shell for 65K tokens and writes nothing;
-        // at 8K it writes one in under two minutes. Qwen keeps the recipe.
+        // at 8K it writes one in under two minutes. Qwen at 16K builds the same
+        // shell in 40% less time than unbounded; at 8K it patches its way to
+        // one and takes longer than unbounded.
         // An explicit --model (dev) decides by its file name, not the image default.
         bool bonsai = qo.model.empty() ? which == "bonsai"
                                        : qo.model.substr(qo.model.rfind('/') + 1).find("bonsai") != std::string::npos;
-        if (bonsai && qo.think_budget < 0) qo.think_budget = 8192;
+        if (qo.think_budget < 0) qo.think_budget = bonsai ? 8192 : 16384;
         if (qo.model.empty()) qo.model = "/models/" + which + ".q27";
         if (qo.tok.empty()) qo.tok = "/models/qwen38.tok";
         std::string d2 = "/models/" + which + "-dflash2.d2w";

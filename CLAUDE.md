@@ -39,7 +39,7 @@ Priority order for every decision: funny > working > safe. The failure mode to a
 
 **Tool-call dialect.** Tools render through q27's existing qwen35 XML template path, `<tool_call>`/`<tool_response>` as vocab added tokens. No JSON function-calling shim. Arguments are flat strings/ints only (`spawn`'s `argv` is one string split by the harness). Parse tool calls from the completed turn, not the stream. Multiple calls per turn run sequentially, one response each, in order. Staying in this dialect is what keeps q27's 22-mode drift corpus protecting the parser; new drift shapes go into that corpus. `read` returns text or a hexdump page, never base64. Tool results truncate at ~4K tokens with a truncation marker. Compiler errors are normal tool responses.
 
-**Sampler** is fixed: `--think --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.05 --think-budget 0`, `--constrain-tools` off. Not greedy (measured 0.511 vs 0.928).
+**Sampler** is fixed: `--think --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.05`, `--constrain-tools` off. Think budget defaults to 16K for Qwen and 8K for Bonsai (design doc Implementation notes). Not greedy (measured 0.511 vs 0.928).
 
 **spawn modes**: `capture` (buffered, default timeout 60 s), `background` (logs to `/state/log/<pid>`), `tty` (child owns `/dev/tty1`; escape chord `Ctrl-]` twice kills its process group). Every child gets a cgroup v2 `potemkin/<pid>` with `memory.max` (default 512 MB) and `pids.max` (default 256); `q27-init` sets its own `oom_score_adj` to -1000. Harness writes `/state/procs` after every change. `rollback(id)` also kills every child spawned after that snapshot.
 

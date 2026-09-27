@@ -47,13 +47,15 @@ in a small window land most of each draft and run at the top of the range,
 long reasoning turns deep into the context run at the bottom. Quote the
 session number.
 
-Asked for a shell, Qwen plans for six minutes, writes `sh` plus the `ls`,
+Asked for a shell, unbounded Qwen plans for six minutes, writes `sh` plus the `ls`,
 `cat` and `rm` it needs, fixes the shell three times and hands you the
 console. Its `ls` prints every symlink with mode `0777`, and the shell exits
 after the first command. Unbounded, Bonsai plans for sixteen minutes and
 writes nothing; with an 8K think budget (its default) it writes a working shell
 in under two minutes, then starts it a second time right as you type your
-next question to it, which the shell reports as `how: not found`. All of this
+next question to it, which the shell reports as `how: not found`. Qwen now
+defaults to a 16K think budget too, which builds the shell in 40% less time; at
+8K it cuts its plans short and spends longer patching. All of this
 is working as intended.
 
 Not done: booting the cuda image on bare metal (the procedure is below and
@@ -174,7 +176,8 @@ the same tokenizer).
   --root /tmp/village --sysroot $PWD/build/sysroot --engine-log /tmp/engine.log
 ```
 
-Add `--dflash2 PACK.d2w` for DFlash2 on 24 GB+ cards, `--ctx N` to cap the
+Add `--dflash2 PACK.d2w` for DFlash2 on 24 GB+ cards, `--think-budget N`
+(default 16384 for Qwen, 8192 for Bonsai, 0 for none), `--ctx N` to cap the
 window when the card is shared. Dev mode needs unprivileged user namespaces
 (on Ubuntu 24.04, `sysctl kernel.apparmor_restrict_unprivileged_userns=0`).
 `./build/q27-init-api --llm api --api-url ... --api-model ...` with the key in
